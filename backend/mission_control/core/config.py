@@ -23,7 +23,12 @@ class Settings(BaseSettings):
     provider_gateway_token: str = "replace-with-a-separate-long-random-token"
     local_admin_token: str = "replace-with-a-long-random-token"
     auto_admin_login: bool = True
-    api_cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+    api_cors_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ]
+    )
 
 
 @lru_cache

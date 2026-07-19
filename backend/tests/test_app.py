@@ -4,15 +4,17 @@ import json
 import subprocess
 import uuid
 import zipfile
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from mission_control.api.v1 import auth, runs
+from mission_control.api.v1.agents import agent_counts
 from mission_control.api.v1.runs import ExecutionRequest
 from mission_control.application.services.agents import DEFAULT_AGENT_PROFILES
 from mission_control.application.services.catalog import CatalogService
@@ -40,7 +42,7 @@ from mission_control.infrastructure.providers.gateway_client import (
     ProviderExecutionError,
     parse_gateway_events,
 )
-from mission_control.main import app
+from mission_control.main import app, wrap_application
 from mission_control.workers.actors.executor import (
     TASK_ACTOR_TIME_LIMIT_MS,
     _execution_progress,
@@ -75,6 +77,56 @@ def test_application_foundation() -> None:
     assert liveness_status == 200
     assert liveness_body == {"status": "operational"}
     assert protected_status == 401
+
+
+@pytest.mark.asyncio
+async def test_unhandled_errors_retain_cors_and_request_id_headers() -> None:
+    application = FastAPI()
+
+    @application.get("/boom")
+    async def boom() -> None:
+        raise RuntimeError("boom")
+
+    wrapped = wrap_application(application)
+    async with AsyncClient(
+        transport=ASGITransport(app=wrapped, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/boom",
+            headers={
+                "Origin": "http://localhost:3000",
+                "X-Request-ID": "test-request-id",
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.headers["Access-Control-Allow-Origin"] == "http://localhost:3000"
+    assert response.headers["X-Request-ID"] == "test-request-id"
+
+
+@pytest.mark.asyncio
+async def test_loopback_dashboard_origin_is_allowed() -> None:
+    application = FastAPI()
+    wrapped = wrap_application(
+        application,
+        ["http://localhost:3000", "http://127.0.0.1:3000"],
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=wrapped),
+        base_url="http://test",
+    ) as client:
+        response = await client.options(
+            "/api/v1/agents",
+            headers={
+                "Origin": "http://127.0.0.1:3000",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization,content-type",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["Access-Control-Allow-Origin"] == "http://127.0.0.1:3000"
 
 
 def _auth_settings(**overrides: object) -> Settings:
@@ -123,6 +175,32 @@ def test_default_agent_profiles_cover_every_workflow_role() -> None:
     assert roles == ["planner", "developer", "qa", "reviewer"]
     assert len(set(names)) == len(names)
     assert all(profile["instructions"].strip() for profile in DEFAULT_AGENT_PROFILES)
+
+
+def test_agent_counts_consumes_sqlalchemy_tuple_results_explicitly() -> None:
+    agent_id = uuid.uuid4()
+
+    class TupleResult:
+        def __init__(self, rows: list[tuple[uuid.UUID, int]]) -> None:
+            self.rows = rows
+
+        def keys(self) -> list[str]:
+            return ["agent_id", "count"]
+
+        def __iter__(self) -> Iterator[tuple[uuid.UUID, int]]:
+            return iter(self.rows)
+
+    assignment_result = MagicMock()
+    assignment_result.tuples.return_value = TupleResult([(agent_id, 2)])
+    invocation_result = MagicMock()
+    invocation_result.tuples.return_value = TupleResult([(agent_id, 3)])
+    session = AsyncMock()
+    session.execute.side_effect = [assignment_result, invocation_result]
+
+    assignments, invocations = asyncio.run(agent_counts(session, [agent_id]))
+
+    assert assignments == {agent_id: 2}
+    assert invocations == {agent_id: 3}
 
 
 def _git(repo: Path, *args: str) -> str:

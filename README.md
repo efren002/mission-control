@@ -2,6 +2,12 @@
 
 Local-first orchestration platform for supervised AI software-development workflows.
 
+## Screenshots
+
+![Dashboard overview](docs/dashboard-page.png)
+
+![Mission screen](docs/mission-page.png)
+
 ## Current scope
 
 This repository contains a Next.js dashboard, FastAPI API, Dramatiq workers, PostgreSQL,
@@ -92,9 +98,15 @@ docker compose up -d --build
 
 Open <http://localhost:3000/projects> (the admin session is established automatically in local development) and create a project. Then open <http://localhost:3000/repositories>, choose the project, and register the relative Git repository path.
 
+![Projects page](docs/project-page.png)
+
+![Repositories page](docs/repository-page.png)
+
 ## Create an objective
 
 Open <http://localhost:3000/objectives>, select a project, describe the desired outcome and acceptance criteria, and create the objective. Press `Plan` to create a controlled, read-only planner run that generates proposed tasks for human review.
+
+![Objectives page](docs/objectives-page.png)
 
 ## Persistent project instructions
 
@@ -113,6 +125,8 @@ a provider and optional model, stores role-specific instructions, reports live p
 can run a safe connectivity test, and exposes its invocation history. Generated tasks can be assigned
 manually, or automatically by matching their requested role to an enabled agent.
 
+![Agents page](docs/agents-page.png)
+
 Open **Settings** to configure the planning provider and model, approval gates, automatic
 assignment, task limits, provider timeout, output retention, repository-write authorization,
 and global coding standards. Each assigned agent profile controls the provider and model used
@@ -120,15 +134,23 @@ for its execution tasks. Administrative and gateway tokens remain environment-ma
 Provider sign-in is available from **Settings**; the resulting credentials live in the gateway's
 Docker volumes and are intentionally never stored through the dashboard.
 
+![Settings page](docs/settings-page.png)
+
 ## Run the Codex planner
 
 After creating an objective, press `Plan`. The API returns immediately and the Dramatiq worker invokes Codex through the provider gateway in read-only mode. Generated tasks appear at <http://localhost:3000/tasks>. A successful plan moves the objective and run to `awaiting_approval`; no files are edited and no Git operations are performed.
+
+![Tasks page](docs/tasks-page.png)
 
 Open <http://localhost:3000/runs> to inspect the durable timeline, generated tasks, provider
 invocation input/output excerpts, and errors for each attempt. Open
 <http://localhost:3000/approvals> to review the proposed tasks. Approving a plan marks the run
 complete and the objective planned; rejecting it records the reason and makes the objective
 eligible for another planning attempt.
+
+![Runs page](docs/run-page.png)
+
+![Approvals page](docs/approvals-page.png)
 
 ## Execute an approved plan
 

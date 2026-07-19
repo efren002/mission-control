@@ -17,7 +17,7 @@ from mission_control.application.services.runtime_detection import (
 from mission_control.core.security import require_local_admin
 from mission_control.infrastructure.database.models import CommandRun, Project, Repository
 from mission_control.infrastructure.database.session import get_session
-from mission_control.main import app
+from mission_control.main import app, application
 from mission_control.workers.actors import commands
 
 
@@ -97,8 +97,8 @@ async def test_runtime_route_returns_effective_commands_and_app_status(
     async def session_override() -> AsyncMock:
         return AsyncMock()
 
-    app.dependency_overrides[require_local_admin] = admin_override
-    app.dependency_overrides[get_session] = session_override
+    application.dependency_overrides[require_local_admin] = admin_override
+    application.dependency_overrides[get_session] = session_override
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
@@ -108,7 +108,7 @@ async def test_runtime_route_returns_effective_commands_and_app_status(
                 params={"repository_id": str(repository_id)},
             )
     finally:
-        app.dependency_overrides.clear()
+        application.dependency_overrides.clear()
 
     assert response.status_code == 200
     payload = response.json()
@@ -148,8 +148,8 @@ async def test_run_tests_route_queues_the_commands_actor(
     async def session_override() -> AsyncMock:
         return AsyncMock()
 
-    app.dependency_overrides[require_local_admin] = admin_override
-    app.dependency_overrides[get_session] = session_override
+    application.dependency_overrides[require_local_admin] = admin_override
+    application.dependency_overrides[get_session] = session_override
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
@@ -159,7 +159,7 @@ async def test_run_tests_route_queues_the_commands_actor(
                 params={"repository_id": str(repository_id)},
             )
     finally:
-        app.dependency_overrides.clear()
+        application.dependency_overrides.clear()
 
     assert response.status_code == 202
     assert response.json()["id"] == str(command_run_id)

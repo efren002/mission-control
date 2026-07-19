@@ -3,6 +3,7 @@ name: mission-control
 services:
   postgres:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-mission_control}
       POSTGRES_USER: ${POSTGRES_USER:-mission_control}
@@ -18,6 +19,7 @@ services:
 
   redis:
     image: redis:7.4-alpine
+    restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -44,6 +46,7 @@ services:
     build:
       context: ./backend
       target: development
+    restart: unless-stopped
     env_file: .env
     command: ["uvicorn", "mission_control.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     user: "${REPOSITORY_UID:-1000}:${REPOSITORY_GID:-1000}"
@@ -72,6 +75,7 @@ services:
     build:
       context: ./backend
       target: development
+    restart: unless-stopped
     env_file: .env
     environment:
       WORKER_MODE: "true"
@@ -91,12 +95,14 @@ services:
   provider-gateway:
     build:
       context: ./providers/gateway
+    restart: unless-stopped
     environment:
       PROVIDER_GATEWAY_TOKEN: ${PROVIDER_GATEWAY_TOKEN:-replace-with-a-separate-long-random-token}
       PROVIDER_GATEWAY_PORT: 8100
       PROVIDER_GATEWAY_WORKSPACE_ROOT: /workspaces
       PROVIDER_GATEWAY_APP_PORT_RANGE: 8201-8210
       CODEX_HOME: /home/runner/.codex
+      CLAUDE_CONFIG_DIR: /home/runner/.claude
       HOME: /home/runner
       DISABLE_AUTOUPDATER: 1
     volumes:
@@ -121,6 +127,7 @@ services:
     build:
       context: ./apps/web
       target: development
+    restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
       NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8000/api/v1/ws/events}

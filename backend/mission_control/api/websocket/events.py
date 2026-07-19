@@ -9,6 +9,11 @@ from mission_control.core.config import get_settings
 router = APIRouter(tags=["realtime"])
 
 
+def _origin_is_allowed(websocket: WebSocket) -> bool:
+    origin = websocket.headers.get("origin")
+    return origin is not None and origin in get_settings().api_cors_origins
+
+
 def _is_closed_transport(error: RuntimeError) -> bool:
     detail = str(error).lower()
     return "closed" in detail or "close message" in detail
@@ -16,6 +21,9 @@ def _is_closed_transport(error: RuntimeError) -> bool:
 
 @router.websocket("/ws/events")
 async def event_stream(websocket: WebSocket) -> None:
+    if not _origin_is_allowed(websocket):
+        await websocket.close(code=1008, reason="Origin not allowed")
+        return
     await websocket.accept()
     redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
     pubsub = redis.pubsub()

@@ -107,7 +107,9 @@ async def agent_counts(
             .group_by(AgentInvocation.agent_id)
         )
     ).tuples()
-    invocations: dict[uuid.UUID, int] = dict(invocation_rows)
+    invocations: dict[uuid.UUID, int] = {
+        agent_id: count for agent_id, count in invocation_rows if agent_id is not None
+    }
     return assignments, invocations
 
 

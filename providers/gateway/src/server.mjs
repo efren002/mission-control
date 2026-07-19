@@ -91,6 +91,9 @@ function environmentFor(provider) {
     PATH: process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     HOME: "/home/runner",
     CODEX_HOME: "/home/runner/.codex",
+    // Keeps claude's config file inside the persisted credentials volume so it
+    // survives container recreation instead of living in the writable layer.
+    CLAUDE_CONFIG_DIR: "/home/runner/.claude",
     LANG: "C.UTF-8",
     TERM: "dumb",
     CI: "1",
@@ -108,6 +111,7 @@ function loginEnvironment(provider) {
     PATH: process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     HOME: "/home/runner",
     CODEX_HOME: "/home/runner/.codex",
+    CLAUDE_CONFIG_DIR: "/home/runner/.claude",
     LANG: "C.UTF-8",
     DISABLE_AUTOUPDATER: "1",
     PROVIDER: provider,

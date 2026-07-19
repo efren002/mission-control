@@ -7,13 +7,13 @@ from mission_control.api.websocket import events
 
 class ClosedWebSocket:
     def __init__(self) -> None:
+        self.headers = {"origin": "http://localhost:3000"}
+        self.close = AsyncMock()
         self.accept = AsyncMock()
         self.send_json = AsyncMock(
             side_effect=[
                 None,
-                RuntimeError(
-                    "unable to perform operation on TCPTransport; the handler is closed"
-                ),
+                RuntimeError("unable to perform operation on TCPTransport; the handler is closed"),
             ]
         )
 
@@ -40,6 +40,22 @@ async def test_event_stream_treats_a_closed_transport_as_a_disconnect(
     pubsub.unsubscribe.assert_awaited_once_with("mission-control.events")
     pubsub.aclose.assert_awaited_once()
     redis.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_event_stream_rejects_disallowed_origins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    websocket = ClosedWebSocket()
+    websocket.headers = {"origin": "https://untrusted.example"}
+    from_url = MagicMock()
+    monkeypatch.setattr(events.Redis, "from_url", from_url)
+
+    await events.event_stream(websocket)  # type: ignore[arg-type]
+
+    websocket.close.assert_awaited_once_with(code=1008, reason="Origin not allowed")
+    websocket.accept.assert_not_awaited()
+    from_url.assert_not_called()
 
 
 @pytest.mark.parametrize(
