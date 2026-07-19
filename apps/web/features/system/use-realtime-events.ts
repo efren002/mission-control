@@ -1,6 +1,6 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 
 import { applicationConfig } from "@/lib/config";
 
@@ -33,6 +33,7 @@ let socket: WebSocket | undefined;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let closeTimer: ReturnType<typeof setTimeout> | undefined;
 let retryAttempt = 0;
+let adminToken = "";
 const listeners = new Set<() => void>();
 
 function publish(next: Partial<RealtimeSnapshot>) {
@@ -41,9 +42,21 @@ function publish(next: Partial<RealtimeSnapshot>) {
 }
 
 function connect() {
-  if (socket) return;
+  if (socket || !adminToken) {
+    if (!adminToken) publish({ connectionState: "disconnected" });
+    return;
+  }
   publish({ connectionState: "connecting" });
-  const ws = new WebSocket(applicationConfig.websocketUrl);
+  const encodedToken = btoa(
+    String.fromCharCode(...new TextEncoder().encode(adminToken)),
+  )
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+  const ws = new WebSocket(applicationConfig.websocketUrl, [
+    "mission-control",
+    `bearer.${encodedToken}`,
+  ]);
   socket = ws;
   ws.onopen = () => {
     retryAttempt = 0;
@@ -115,12 +128,28 @@ function getServerSnapshot(): RealtimeSnapshot {
   return INITIAL_SNAPSHOT;
 }
 
+function setAdminToken(token: string) {
+  if (adminToken === token) return;
+  adminToken = token;
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    retryTimer = undefined;
+  }
+  retryAttempt = 0;
+  const previous = socket;
+  socket = undefined;
+  previous?.close();
+  if (listeners.size > 0) connect();
+}
+
 /**
  * Subscribes to the shared realtime event stream. All callers share a single
  * WebSocket connection and see the same feed.
  */
-export function useRealtimeEvents(): RealtimeSnapshot {
-  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+export function useRealtimeEvents(token: string): RealtimeSnapshot {
+  const state = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  useEffect(() => setAdminToken(token), [token]);
+  return state;
 }
 
 /** Tears down the shared connection and state. Test use only. */
@@ -131,6 +160,7 @@ export function resetRealtimeEventsForTesting() {
   retryTimer = undefined;
   closeTimer = undefined;
   retryAttempt = 0;
+  adminToken = "";
   const ws = socket;
   socket = undefined;
   ws?.close();

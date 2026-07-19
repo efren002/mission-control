@@ -6,13 +6,16 @@ from datetime import datetime
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -51,6 +54,23 @@ class SystemSetting(TimestampMixin, Base):
     value: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
 
+class DispatchJob(TimestampMixin, Base):
+    __tablename__ = "dispatch_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('plan_objective', 'run_project_tests')",
+            name="ck_dispatch_jobs_kind",
+        ),
+        CheckConstraint("attempts >= 0", name="ck_dispatch_jobs_attempts"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
 class Repository(TimestampMixin, Base):
     __tablename__ = "repositories"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -64,6 +84,13 @@ class Repository(TimestampMixin, Base):
 
 class Objective(TimestampMixin, Base):
     __tablename__ = "objectives"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'planning', 'awaiting_approval', 'planned', "
+            "'awaiting_execution_approval', 'executing', 'completed', 'failed', 'rejected')",
+            name="ck_objectives_status",
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
@@ -75,6 +102,13 @@ class Objective(TimestampMixin, Base):
 
 class ObjectiveAttachment(TimestampMixin, Base):
     __tablename__ = "objective_attachments"
+    __table_args__ = (
+        CheckConstraint("size_bytes > 0", name="ck_objective_attachments_size"),
+        CheckConstraint(
+            "content_type IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif')",
+            name="ck_objective_attachments_content_type",
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     objective_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("objectives.id", ondelete="CASCADE"), index=True, nullable=False
@@ -86,6 +120,16 @@ class ObjectiveAttachment(TimestampMixin, Base):
 
 class Agent(TimestampMixin, Base):
     __tablename__ = "agents"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('planner', 'developer', 'qa', 'reviewer')",
+            name="ck_agents_role",
+        ),
+        CheckConstraint(
+            "provider IN ('codex', 'claude')",
+            name="ck_agents_provider",
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     role: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
@@ -97,6 +141,17 @@ class Agent(TimestampMixin, Base):
 
 class Task(TimestampMixin, Base):
     __tablename__ = "tasks"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('planned', 'queued', 'in_progress', 'completed', "
+            "'failed', 'blocked', 'rejected', 'reverted')",
+            name="ck_tasks_status",
+        ),
+        CheckConstraint(
+            "agent_role IN ('developer', 'qa', 'reviewer')",
+            name="ck_tasks_agent_role",
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     objective_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("objectives.id", ondelete="CASCADE"), index=True, nullable=False
@@ -116,6 +171,14 @@ class Task(TimestampMixin, Base):
 
 class Run(TimestampMixin, Base):
     __tablename__ = "runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'planning', 'awaiting_approval', 'completed', "
+            "'rejected', 'awaiting_execution_approval', 'queued_for_execution', "
+            "'executing', 'failed')",
+            name="ck_runs_status",
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     objective_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("objectives.id", ondelete="CASCADE"), index=True, nullable=False
@@ -129,6 +192,12 @@ class Run(TimestampMixin, Base):
 
 class AgentInvocation(TimestampMixin, Base):
     __tablename__ = "agent_invocations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'completed', 'failed')",
+            name="ck_agent_invocations_status",
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     agent_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("agents.id", ondelete="CASCADE"), index=True, nullable=False
@@ -149,6 +218,19 @@ class AgentInvocation(TimestampMixin, Base):
 
 class CommandRun(TimestampMixin, Base):
     __tablename__ = "command_runs"
+    __table_args__ = (
+        CheckConstraint("kind = 'test'", name="ck_command_runs_kind"),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'passed', 'failed', 'error')",
+            name="ck_command_runs_status",
+        ),
+        Index(
+            "uq_command_runs_active_repository",
+            "repository_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
@@ -183,6 +265,23 @@ class RunEvent(Base):
 
 class Approval(TimestampMixin, Base):
     __tablename__ = "approvals"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('plan', 'execution')",
+            name="ck_approvals_kind",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected')",
+            name="ck_approvals_status",
+        ),
+        Index(
+            "uq_approvals_pending_run_kind",
+            "run_id",
+            "kind",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("runs.id", ondelete="CASCADE"), index=True, nullable=False
@@ -194,4 +293,3 @@ class Approval(TimestampMixin, Base):
     )
     decision_reason: Mapped[str | None] = mapped_column(Text)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-

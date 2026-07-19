@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mission_control.application.services.job_dispatch import enqueue_job
 from mission_control.application.services.runtime_detection import (
     DetectedCommands,
     detect_commands,
@@ -137,7 +139,17 @@ class ProjectRuntimeService:
             status="queued",
         )
         self.session.add(command_run)
-        await self.session.commit()
+        await self.session.flush()
+        enqueue_job(
+            self.session,
+            kind="run_project_tests",
+            entity_id=command_run.id,
+        )
+        try:
+            await self.session.commit()
+        except IntegrityError as error:
+            await self.session.rollback()
+            raise RuntimeError("Tests are already running for this repository") from error
         await self.session.refresh(command_run)
         return command_run
 

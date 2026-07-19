@@ -9,6 +9,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from mission_control.api.v1 import project_runtime
+from mission_control.application.services.job_dispatch import DispatchResult
 from mission_control.application.services.project_runtime import RuntimeSnapshot
 from mission_control.application.services.runtime_detection import (
     DetectedCommands,
@@ -18,7 +19,6 @@ from mission_control.core.security import require_local_admin
 from mission_control.infrastructure.database.models import CommandRun, Project, Repository
 from mission_control.infrastructure.database.session import get_session
 from mission_control.main import app, application
-from mission_control.workers.actors import commands
 
 
 def test_detects_node_commands_from_package_scripts(tmp_path: Path) -> None:
@@ -90,7 +90,6 @@ async def test_runtime_route_returns_effective_commands_and_app_status(
     service = MagicMock()
     service.snapshot = AsyncMock(return_value=snapshot)
     monkeypatch.setattr(project_runtime, "ProjectRuntimeService", lambda _: service)
-
     async def admin_override() -> str:
         return "admin"
 
@@ -139,8 +138,8 @@ async def test_run_tests_route_queues_the_commands_actor(
     service = MagicMock()
     service.queue_tests = AsyncMock(return_value=command_run)
     monkeypatch.setattr(project_runtime, "ProjectRuntimeService", lambda _: service)
-    send = MagicMock()
-    monkeypatch.setattr(commands.run_project_tests, "send", send)
+    dispatch = AsyncMock(return_value=DispatchResult(sent=1))
+    monkeypatch.setattr(project_runtime, "dispatch_pending_jobs", dispatch)
 
     async def admin_override() -> str:
         return "admin"
@@ -164,4 +163,4 @@ async def test_run_tests_route_queues_the_commands_actor(
     assert response.status_code == 202
     assert response.json()["id"] == str(command_run_id)
     service.queue_tests.assert_awaited_once_with(project_id, repository_id)
-    send.assert_called_once_with(str(command_run_id))
+    dispatch.assert_awaited_once()

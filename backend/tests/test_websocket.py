@@ -1,3 +1,4 @@
+import base64
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -7,7 +8,13 @@ from mission_control.api.websocket import events
 
 class ClosedWebSocket:
     def __init__(self) -> None:
-        self.headers = {"origin": "http://localhost:3000"}
+        token = base64.urlsafe_b64encode(
+            events.get_settings().local_admin_token.encode()
+        ).decode().rstrip("=")
+        self.headers = {
+            "origin": "http://localhost:3000",
+            "sec-websocket-protocol": f"mission-control, bearer.{token}",
+        }
         self.close = AsyncMock()
         self.accept = AsyncMock()
         self.send_json = AsyncMock(
@@ -35,7 +42,7 @@ async def test_event_stream_treats_a_closed_transport_as_a_disconnect(
 
     await events.event_stream(websocket)  # type: ignore[arg-type]
 
-    websocket.accept.assert_awaited_once()
+    websocket.accept.assert_awaited_once_with(subprotocol="mission-control")
     assert websocket.send_json.await_count == 2
     pubsub.unsubscribe.assert_awaited_once_with("mission-control.events")
     pubsub.aclose.assert_awaited_once()
@@ -54,6 +61,25 @@ async def test_event_stream_rejects_disallowed_origins(
     await events.event_stream(websocket)  # type: ignore[arg-type]
 
     websocket.close.assert_awaited_once_with(code=1008, reason="Origin not allowed")
+    websocket.accept.assert_not_awaited()
+    from_url.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_event_stream_rejects_invalid_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    websocket = ClosedWebSocket()
+    token = base64.urlsafe_b64encode(b"wrong-token").decode().rstrip("=")
+    websocket.headers["sec-websocket-protocol"] = (
+        f"mission-control, bearer.{token}"
+    )
+    from_url = MagicMock()
+    monkeypatch.setattr(events.Redis, "from_url", from_url)
+
+    await events.event_stream(websocket)  # type: ignore[arg-type]
+
+    websocket.close.assert_awaited_once_with(code=1008, reason="Invalid credentials")
     websocket.accept.assert_not_awaited()
     from_url.assert_not_called()
 

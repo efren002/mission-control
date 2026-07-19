@@ -8,9 +8,11 @@ import { useRealtimeEvents } from "@/features/system/use-realtime-events";
 import { AdminTokenControl } from "@/components/layout/admin-token-control";
 import { MobileNavigation } from "@/components/layout/sidebar";
 import { openOnboardingTour } from "@/features/onboarding/onboarding-state";
+import { useAdminToken } from "@/features/auth/use-admin-token";
 
 export function Topbar() {
-  const { connectionState, lastEvent } = useRealtimeEvents();
+  const { token } = useAdminToken();
+  const { connectionState, lastEvent } = useRealtimeEvents(token);
   const connected = connectionState === "connected";
 
   return (

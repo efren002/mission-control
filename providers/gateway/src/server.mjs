@@ -230,6 +230,55 @@ function writeEvent(response, event, data) {
   response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
+function killProcessGroup(child, signal) {
+  if (!child.pid) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    // The process group already exited.
+  }
+}
+
+function superviseStreamingProcess(request, response, child, timeoutMs) {
+  let finished = false;
+  let cancelled = false;
+  let timedOut = false;
+  let forceKillTimer;
+
+  const terminate = (reason) => {
+    if (finished || cancelled) return;
+    cancelled = true;
+    timedOut = reason === "timeout";
+    killProcessGroup(child, "SIGTERM");
+    forceKillTimer = setTimeout(() => killProcessGroup(child, "SIGKILL"), 2_000);
+    forceKillTimer.unref();
+  };
+  const onAborted = () => terminate("disconnect");
+  const onResponseClose = () => {
+    if (!response.writableEnded) terminate("disconnect");
+  };
+  request.once("aborted", onAborted);
+  response.once("close", onResponseClose);
+  const timeoutTimer = setTimeout(() => terminate("timeout"), timeoutMs);
+  timeoutTimer.unref();
+
+  return {
+    finish() {
+      finished = true;
+      clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      request.off("aborted", onAborted);
+      response.off("close", onResponseClose);
+    },
+    get cancelled() {
+      return cancelled;
+    },
+    get timedOut() {
+      return timedOut;
+    },
+  };
+}
+
 function runVersion(provider) {
   return new Promise((resolveVersion) => {
     const config = providerCommands[provider];
@@ -414,11 +463,12 @@ async function execute(request, response, body) {
     cwd: workspace,
     env: environmentFor(provider),
     stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
   });
   let stdout = "";
   let stderr = "";
-  let timedOut = false;
   const startedAt = Date.now();
+  const supervisor = superviseStreamingProcess(request, response, child, timeoutMs);
 
   writeEvent(response, "started", { provider, workspace, command, startedAt: new Date(startedAt).toISOString() });
   child.stdout.on("data", (chunk) => {
@@ -430,20 +480,14 @@ async function execute(request, response, body) {
     writeEvent(response, "stderr", { data: chunk.toString("utf8") });
   });
 
-  const timer = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGTERM");
-    setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
-  }, timeoutMs);
-  timer.unref();
-
   await new Promise((resolveProcess) => {
     child.on("error", (error) => {
       stderr = `${stderr}${error.message}`;
+      supervisor.finish();
       resolveProcess();
     });
     child.on("close", (code, signal) => {
-      clearTimeout(timer);
+      supervisor.finish();
       const parsedUsage = parseProviderUsage(provider, stdout);
       providerUsage.set(
         provider,
@@ -480,7 +524,8 @@ async function execute(request, response, body) {
         provider,
         exitCode: code,
         signal,
-        timedOut,
+        timedOut: supervisor.timedOut,
+        cancelled: supervisor.cancelled && !supervisor.timedOut,
         durationMs: Date.now() - startedAt,
         stdoutBytes: Buffer.byteLength(stdout),
         stderrBytes: Buffer.byteLength(stderr),
@@ -490,17 +535,18 @@ async function execute(request, response, body) {
   });
 }
 
-async function runShellCommand(response, { command, workspace, timeoutMs: requestedTimeoutMs }) {
+async function runShellCommand(request, response, { command, workspace, timeoutMs: requestedTimeoutMs }) {
   const timeoutMs = Math.min(Math.max(Number(requestedTimeoutMs ?? DEFAULT_TIMEOUT_MS), 1_000), DEFAULT_TIMEOUT_MS);
   const child = spawn("sh", ["-c", command], {
     cwd: workspace,
     env: commandEnvironment(null),
     stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
   });
   let stdout = "";
   let stderr = "";
-  let timedOut = false;
   const startedAt = Date.now();
+  const supervisor = superviseStreamingProcess(request, response, child, timeoutMs);
 
   writeEvent(response, "started", { workspace, command, startedAt: new Date(startedAt).toISOString() });
   child.stdout.on("data", (chunk) => {
@@ -512,22 +558,16 @@ async function runShellCommand(response, { command, workspace, timeoutMs: reques
     writeEvent(response, "stderr", { data: chunk.toString("utf8") });
   });
 
-  const timer = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGTERM");
-    setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
-  }, timeoutMs);
-  timer.unref();
-
   await new Promise((resolveProcess) => {
     child.on("error", (error) => {
-      clearTimeout(timer);
+      supervisor.finish();
       stderr = `${stderr}${error.message}`;
       writeEvent(response, "stderr", { data: error.message });
       writeEvent(response, "completed", {
         exitCode: null,
         signal: null,
-        timedOut,
+        timedOut: supervisor.timedOut,
+        cancelled: supervisor.cancelled && !supervisor.timedOut,
         durationMs: Date.now() - startedAt,
         stdoutBytes: Buffer.byteLength(stdout),
         stderrBytes: Buffer.byteLength(stderr),
@@ -535,11 +575,12 @@ async function runShellCommand(response, { command, workspace, timeoutMs: reques
       resolveProcess();
     });
     child.on("close", (code, signal) => {
-      clearTimeout(timer);
+      supervisor.finish();
       writeEvent(response, "completed", {
         exitCode: code,
         signal,
-        timedOut,
+        timedOut: supervisor.timedOut,
+        cancelled: supervisor.cancelled && !supervisor.timedOut,
         durationMs: Date.now() - startedAt,
         stdoutBytes: Buffer.byteLength(stdout),
         stderrBytes: Buffer.byteLength(stderr),
@@ -713,7 +754,7 @@ const server = createServer(async (request, response) => {
         "cache-control": "no-cache, no-store",
         connection: "keep-alive",
       });
-      await runShellCommand(response, { command, workspace, timeoutMs: body.timeoutMs });
+      await runShellCommand(request, response, { command, workspace, timeoutMs: body.timeoutMs });
       response.end();
       return;
     }

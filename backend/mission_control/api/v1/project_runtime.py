@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mission_control.application.services.job_dispatch import dispatch_pending_jobs
 from mission_control.application.services.project_runtime import (
     ProjectRuntimeService,
     RuntimeSnapshot,
@@ -168,9 +169,7 @@ async def run_project_tests(
         raise HTTPException(status_code=422, detail=str(error)) from error
     except RuntimeError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    from mission_control.workers.actors.commands import run_project_tests as tests_actor
-
-    tests_actor.send(str(command_run.id))
+    await dispatch_pending_jobs()
     return CommandRunResponse.model_validate(command_run)
 
 

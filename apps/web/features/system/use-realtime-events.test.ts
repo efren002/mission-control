@@ -13,7 +13,10 @@ class FakeWebSocket {
   onerror: (() => void) | null = null;
   onclose: (() => void) | null = null;
 
-  constructor(public url: string) {
+  constructor(
+    public url: string,
+    public protocols?: string | string[],
+  ) {
     FakeWebSocket.instances.push(this);
   }
 
@@ -38,7 +41,7 @@ describe("useRealtimeEvents", () => {
   });
 
   it("collects a newest-first feed and skips keepalives", () => {
-    const { result } = renderHook(() => useRealtimeEvents());
+    const { result } = renderHook(() => useRealtimeEvents("local-token"));
     const socket = FakeWebSocket.instances[0];
 
     act(() => {
@@ -58,7 +61,7 @@ describe("useRealtimeEvents", () => {
   });
 
   it("caps the feed at twenty events", () => {
-    const { result } = renderHook(() => useRealtimeEvents());
+    const { result } = renderHook(() => useRealtimeEvents("local-token"));
     const socket = FakeWebSocket.instances[0];
 
     act(() => {
@@ -72,8 +75,8 @@ describe("useRealtimeEvents", () => {
   });
 
   it("shares one connection across consumers", () => {
-    const first = renderHook(() => useRealtimeEvents());
-    const second = renderHook(() => useRealtimeEvents());
+    const first = renderHook(() => useRealtimeEvents("local-token"));
+    const second = renderHook(() => useRealtimeEvents("local-token"));
     const socket = FakeWebSocket.instances[0];
 
     act(() => {
@@ -89,9 +92,9 @@ describe("useRealtimeEvents", () => {
   it("keeps the connection open across a quick remount", () => {
     vi.useFakeTimers();
     try {
-      const first = renderHook(() => useRealtimeEvents());
+      const first = renderHook(() => useRealtimeEvents("local-token"));
       first.unmount();
-      renderHook(() => useRealtimeEvents());
+      renderHook(() => useRealtimeEvents("local-token"));
       act(() => {
         vi.advanceTimersByTime(5_000);
       });
@@ -99,5 +102,16 @@ describe("useRealtimeEvents", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("authenticates without putting the token in the websocket URL", () => {
+    renderHook(() => useRealtimeEvents("secret token"));
+    const socket = FakeWebSocket.instances[0];
+
+    expect(socket.url).not.toContain("secret");
+    expect(socket.protocols).toEqual([
+      "mission-control",
+      "bearer.c2VjcmV0IHRva2Vu",
+    ]);
   });
 });

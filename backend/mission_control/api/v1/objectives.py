@@ -13,6 +13,7 @@ from mission_control.application.services.attachments import (
     MAX_ATTACHMENT_BYTES,
     AttachmentService,
 )
+from mission_control.application.services.job_dispatch import dispatch_pending_jobs
 from mission_control.application.services.objectives import ObjectiveService
 from mission_control.application.services.settings import get_workflow_settings
 from mission_control.core.security import require_local_admin
@@ -232,7 +233,5 @@ async def start_planning(objective_id: uuid.UUID, _: Admin, session: Session) ->
         raise HTTPException(status_code=404, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    from mission_control.workers.actors.planner import plan_objective
-
-    plan_objective.send(str(run.id))
+    await dispatch_pending_jobs()
     return RunResponse.model_validate(run)

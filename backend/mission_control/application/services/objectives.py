@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mission_control.application.services.attachments import (
     remove_objective_attachment_files,
 )
+from mission_control.application.services.job_dispatch import enqueue_job
 from mission_control.application.services.run_events import append_run_event
 from mission_control.infrastructure.database.models import Objective, Project, Run
 
@@ -102,6 +103,7 @@ class ObjectiveService:
             "run.created",
             {"objective_id": str(objective.id), "objective_title": objective.title},
         )
+        enqueue_job(self.session, kind="plan_objective", entity_id=run.id)
         await self.session.commit()
         await self.session.refresh(run)
         return run

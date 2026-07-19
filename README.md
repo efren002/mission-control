@@ -45,8 +45,8 @@ The dashboard signs in automatically in local development: the API serves the ad
 `AUTO_ADMIN_LOGIN=true`, and a real (non-placeholder) token is configured. The API port is bound
 to `127.0.0.1` and CORS is restricted to the dashboard origin. Set `AUTO_ADMIN_LOGIN=false` and
 enter the token manually in the top bar before exposing the service beyond localhost. The
-realtime endpoint currently emits non-sensitive service telemetry only; application events will
-require authenticated sessions before implementation.
+realtime endpoint authenticates with the same admin token using the WebSocket subprotocol header;
+workflow events are never available to an unauthenticated socket.
 
 ## Authenticate the provider gateway
 

@@ -111,8 +111,8 @@ function HealthRow({
 
 export function DashboardOverview() {
   const health = useSystemHealth();
-  const realtime = useRealtimeEvents();
   const { token } = useAdminToken();
+  const realtime = useRealtimeEvents(token);
   const [agentSummary, setAgentSummary] = useState({ online: 0, total: 0 });
   const [workflow, setWorkflow] = useState<WorkflowSummary>(emptySummary);
   const [providers, setProviders] = useState<Record<string, ProviderStatus>>({});

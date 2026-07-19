@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -118,6 +118,25 @@ test("commands/stream rejects a workspace outside the root", async () => {
     body: JSON.stringify({ workspace: "/etc", command: "echo hi" }),
   });
   assert.equal(response.status, 400);
+});
+
+test("commands/stream terminates the process group when the client disconnects", async () => {
+  const marker = join(workspace, "orphaned-command.txt");
+  const controller = new AbortController();
+  const response = await request("/v1/commands/stream", {
+    method: "POST",
+    signal: controller.signal,
+    body: JSON.stringify({
+      workspace,
+      command: "sleep 2; echo survived > orphaned-command.txt",
+    }),
+  });
+  const pendingBody = response.text();
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
+  controller.abort();
+  await assert.rejects(pendingBody, /abort/i);
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_500));
+  assert.equal(existsSync(marker), false);
 });
 
 test("apps lifecycle: start substitutes the port, blocks duplicates, stops cleanly", async () => {

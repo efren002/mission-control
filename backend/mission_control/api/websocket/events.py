@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import json
+import secrets
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from redis.asyncio import Redis
@@ -14,6 +16,32 @@ def _origin_is_allowed(websocket: WebSocket) -> bool:
     return origin is not None and origin in get_settings().api_cors_origins
 
 
+def _requested_admin_token(websocket: WebSocket) -> str | None:
+    protocols = websocket.headers.get("sec-websocket-protocol", "")
+    encoded = next(
+        (
+            item.strip().removeprefix("bearer.")
+            for item in protocols.split(",")
+            if item.strip().startswith("bearer.")
+        ),
+        None,
+    )
+    if not encoded:
+        return None
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        return base64.urlsafe_b64decode(f"{encoded}{padding}").decode("utf-8")
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
+def _is_authenticated(websocket: WebSocket) -> bool:
+    token = _requested_admin_token(websocket)
+    return token is not None and secrets.compare_digest(
+        token, get_settings().local_admin_token
+    )
+
+
 def _is_closed_transport(error: RuntimeError) -> bool:
     detail = str(error).lower()
     return "closed" in detail or "close message" in detail
@@ -24,7 +52,10 @@ async def event_stream(websocket: WebSocket) -> None:
     if not _origin_is_allowed(websocket):
         await websocket.close(code=1008, reason="Origin not allowed")
         return
-    await websocket.accept()
+    if not _is_authenticated(websocket):
+        await websocket.close(code=1008, reason="Invalid credentials")
+        return
+    await websocket.accept(subprotocol="mission-control")
     redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
     pubsub = redis.pubsub()
     await pubsub.subscribe("mission-control.events")
