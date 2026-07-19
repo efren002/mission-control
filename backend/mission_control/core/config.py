@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     worker_mode: bool = False
     redis_url: str = "redis://localhost:6379/0"
     repository_root: str = "/repositories"
+    repository_host_root: str | None = None
+    mission_control_host_root: str | None = None
     provider_repository_root: str = "/workspaces/repositories"
     attachment_root: str = "/attachments"
     provider_attachment_root: str = "/workspaces/attachments"

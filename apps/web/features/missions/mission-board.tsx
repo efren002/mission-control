@@ -560,8 +560,10 @@ export function MissionDetail({
   const canPlan = ["draft", "failed", "rejected"].includes(objective.status);
   const lastError =
     [...(detail?.invocations ?? [])].reverse().find((item) => item.error)?.error ?? null;
+  const selectedRepository =
+    repositories.find((item) => item.id === detail?.repository_id) ?? null;
   const repositoryPath =
-    repositories.find((item) => item.id === detail?.repository_id)?.path ?? null;
+    selectedRepository?.host_path ?? selectedRepository?.path ?? null;
 
   const decide = async (decision: "approve" | "reject") => {
     if (!pendingApproval) return;
@@ -898,6 +900,7 @@ export function MissionDetail({
         <ProjectRuntimePanel
           projectId={objective.project_id}
           repositoryId={detail.repository_id}
+          repositoryHostPath={selectedRepository?.host_path ?? null}
           token={token}
         />
       )}

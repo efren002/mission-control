@@ -300,9 +300,8 @@ export function DashboardOverview() {
             <Link
               key={label}
               href={href}
-              className="relative block overflow-hidden bg-panel p-4 transition-colors hover:bg-[#151310] focus-visible:bg-[#151310] focus-visible:outline-none"
+              className="block bg-panel p-4 transition-colors hover:bg-[#151310] focus-visible:bg-[#151310] focus-visible:outline-none"
             >
-              <div className="absolute right-0 top-0 h-16 w-16 bg-signal/[0.025]" />
               <div className="mb-7 flex items-center justify-between">
                 <p className="text-[9px] font-bold uppercase tracking-[0.14em] text-dim">
                   {label}

@@ -52,11 +52,16 @@ describe("ProjectRuntimePanel", () => {
       <ProjectRuntimePanel
         projectId="project-1"
         repositoryId="repository-1"
+        repositoryHostPath="/home/user/mission-control/repositories/storefront"
         token="local-token"
       />,
     );
 
     expect(await screen.findByText("Tests: npm test")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /open in vs code/i })).toHaveAttribute(
+      "href",
+      "vscode://file/home/user/mission-control/repositories/storefront",
+    );
     fireEvent.click(screen.getByRole("button", { name: /run tests/i }));
 
     await waitFor(() =>

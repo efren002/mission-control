@@ -116,6 +116,9 @@ class CatalogService:
         )
         return list(result)
 
+    def repository_host_path(self, repository: Repository) -> str | None:
+        return self.inspector.host_path(repository.path)
+
     async def register_repository(
         self, project_id: uuid.UUID, relative_path: str
     ) -> RegisteredRepository:

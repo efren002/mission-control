@@ -255,6 +255,37 @@ def test_repository_inspection_treats_untracked_files_as_dirty(tmp_path: Path) -
     assert inspection.clean is False
 
 
+def test_repository_host_path_maps_the_container_path_to_the_local_checkout(
+    tmp_path: Path,
+) -> None:
+    mission_root = tmp_path / "mission-control"
+    settings = Settings(
+        _env_file=None,
+        repository_root="/repositories",
+        repository_host_root="./repositories",
+        mission_control_host_root=str(mission_root),
+    )
+    inspector = RepositoryInspector(settings)
+
+    host_path = inspector.host_path("/repositories/storefront")
+
+    assert host_path == str(mission_root / "repositories" / "storefront")
+
+
+def test_repository_host_path_rejects_paths_outside_the_repository_root(
+    tmp_path: Path,
+) -> None:
+    inspector = RepositoryInspector(
+        Settings(
+            _env_file=None,
+            repository_root="/repositories",
+            repository_host_root=str(tmp_path / "repositories"),
+        )
+    )
+
+    assert inspector.host_path("/tmp/unregistered") is None
+
+
 def test_repository_archive_contains_only_tracked_files(tmp_path: Path) -> None:
     repo = tmp_path / "demo"
     repo.mkdir()
@@ -485,9 +516,7 @@ def test_stale_execution_resume_requeues_only_the_interrupted_task(
 
     send = MagicMock()
     monkeypatch.setattr(runs, "append_run_event", no_event)
-    monkeypatch.setattr(
-        "mission_control.workers.actors.executor.execute_run.send", send
-    )
+    monkeypatch.setattr("mission_control.workers.actors.executor.execute_run.send", send)
 
     response = asyncio.run(runs.resume_execution(run.id, "admin", session))
 
@@ -524,9 +553,7 @@ def test_recent_execution_cannot_be_resumed(
     session.get.return_value = objective
     session.scalars.return_value = []
     send = MagicMock()
-    monkeypatch.setattr(
-        "mission_control.workers.actors.executor.execute_run.send", send
-    )
+    monkeypatch.setattr("mission_control.workers.actors.executor.execute_run.send", send)
 
     with pytest.raises(HTTPException, match="recent worker activity") as error:
         asyncio.run(runs.resume_execution(run.id, "admin", session))
@@ -564,9 +591,7 @@ def test_stale_queued_execution_can_be_republished(
 
     send = MagicMock()
     monkeypatch.setattr(runs, "append_run_event", no_event)
-    monkeypatch.setattr(
-        "mission_control.workers.actors.executor.execute_run.send", send
-    )
+    monkeypatch.setattr("mission_control.workers.actors.executor.execute_run.send", send)
 
     response = asyncio.run(runs.resume_execution(run.id, "admin", session))
 

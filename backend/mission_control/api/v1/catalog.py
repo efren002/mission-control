@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from mission_control.application.services.catalog import CatalogService
 from mission_control.core.security import require_local_admin
+from mission_control.infrastructure.database.models import Repository
 from mission_control.infrastructure.database.session import get_session
 
 router = APIRouter(tags=["catalog"])
@@ -63,6 +64,7 @@ class RepositoryResponse(BaseModel):
     project_id: uuid.UUID
     name: str
     path: str
+    host_path: str | None = None
     default_branch: str
 
     model_config = {"from_attributes": True}
@@ -73,6 +75,11 @@ class RepositoryDetail(RepositoryResponse):
     commit_sha: str
     clean: bool
     technology: list[str]
+
+
+def _repository_response(service: CatalogService, repository: Repository) -> RepositoryResponse:
+    response = RepositoryResponse.model_validate(repository)
+    return response.model_copy(update={"host_path": service.repository_host_path(repository)})
 
 
 @router.get("/projects", response_model=list[ProjectResponse])
@@ -148,9 +155,10 @@ async def list_repositories(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> list[RepositoryResponse]:
+    service = CatalogService(session)
     return [
-        RepositoryResponse.model_validate(item)
-        for item in await CatalogService(session).list_repositories(limit, offset)
+        _repository_response(service, item)
+        for item in await service.list_repositories(limit, offset)
     ]
 
 
@@ -158,17 +166,16 @@ async def list_repositories(
 async def register_repository(
     payload: RepositoryCreate, _: Admin, session: Session
 ) -> RepositoryDetail:
+    service = CatalogService(session)
     try:
-        registered = await CatalogService(session).register_repository(
-            payload.project_id, payload.relative_path
-        )
+        registered = await service.register_repository(payload.project_id, payload.relative_path)
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except (ValueError, FileNotFoundError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     inspection = registered.inspection
     return RepositoryDetail(
-        **RepositoryResponse.model_validate(registered.repository).model_dump(),
+        **_repository_response(service, registered.repository).model_dump(),
         branch=inspection.branch,
         commit_sha=inspection.commit_sha,
         clean=inspection.clean,
@@ -184,17 +191,16 @@ async def register_repository(
 async def create_repository(
     payload: NewRepositoryCreate, _: Admin, session: Session
 ) -> RepositoryDetail:
+    service = CatalogService(session)
     try:
-        created = await CatalogService(session).create_repository(
-            payload.project_id, payload.name
-        )
+        created = await service.create_repository(payload.project_id, payload.name)
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except (OSError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     inspection = created.inspection
     return RepositoryDetail(
-        **RepositoryResponse.model_validate(created.repository).model_dump(),
+        **_repository_response(service, created.repository).model_dump(),
         branch=inspection.branch,
         commit_sha=inspection.commit_sha,
         clean=inspection.clean,
@@ -215,7 +221,7 @@ async def inspect_repository(
     except (ValueError, FileNotFoundError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     return RepositoryDetail(
-        **RepositoryResponse.model_validate(repository).model_dump(),
+        **_repository_response(service, repository).model_dump(),
         branch=inspection.branch,
         commit_sha=inspection.commit_sha,
         clean=inspection.clean,
@@ -259,7 +265,7 @@ async def update_repository(
         )
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
-    return RepositoryResponse.model_validate(repository)
+    return _repository_response(CatalogService(session), repository)
 
 
 @router.delete("/repositories/{repository_id}", status_code=status.HTTP_204_NO_CONTENT)

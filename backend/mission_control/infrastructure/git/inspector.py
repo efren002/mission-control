@@ -22,6 +22,22 @@ class RepositoryInspector:
         self.settings = settings or get_settings()
         self.root = Path(self.settings.repository_root).resolve()
 
+    def host_path(self, repository_path: str | Path) -> str | None:
+        """Map a container repository path to the corresponding path on the host."""
+        configured_root = self.settings.repository_host_root
+        if not configured_root:
+            return None
+        host_root = Path(configured_root).expanduser()
+        if not host_root.is_absolute():
+            if not self.settings.mission_control_host_root:
+                return None
+            host_root = Path(self.settings.mission_control_host_root) / host_root
+        try:
+            relative_path = Path(repository_path).resolve().relative_to(self.root)
+        except ValueError:
+            return None
+        return str((host_root / relative_path).resolve())
+
     async def resolve_relative_path(self, relative_path: str) -> Path:
         candidate = Path(relative_path)
         if candidate.is_absolute() or ".." in candidate.parts:
@@ -58,9 +74,7 @@ class RepositoryInspector:
         target = path.resolve(strict=True)  # noqa: ASYNC240 - subprocess boundary is async; filesystem check is small.
         if not target.is_dir() or not self._inside_root(target):
             raise ValueError("Repository path is outside the configured repository root")
-        return await self._git_bytes(
-            target, "archive", "--format=zip", "HEAD", timeout_seconds=60
-        )
+        return await self._git_bytes(target, "archive", "--format=zip", "HEAD", timeout_seconds=60)
 
     async def commit_diff(self, path: Path, commit_sha: str) -> str:
         """Return the stat and patch for one commit against its parent."""
@@ -69,9 +83,7 @@ class RepositoryInspector:
             raise ValueError("Repository path is outside the configured repository root")
         if not re.fullmatch(r"[0-9a-f]{7,64}", commit_sha):
             raise ValueError("Commit reference is not a valid SHA")
-        return await self._git(
-            target, "show", "--stat", "--patch", "--no-color", commit_sha
-        )
+        return await self._git(target, "show", "--stat", "--patch", "--no-color", commit_sha)
 
     def _inside_root(self, path: Path) -> bool:
         try:
@@ -93,9 +105,7 @@ class RepositoryInspector:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=timeout_seconds
-            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
         except TimeoutError as error:
             process.kill()
             await process.wait()

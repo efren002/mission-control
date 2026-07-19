@@ -48,6 +48,8 @@ services:
       target: development
     restart: unless-stopped
     env_file: .env
+    environment:
+      MISSION_CONTROL_HOST_ROOT: ${PWD}
     command: ["uvicorn", "mission_control.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     user: "${REPOSITORY_UID:-1000}:${REPOSITORY_GID:-1000}"
     ports:

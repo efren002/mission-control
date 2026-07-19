@@ -1,7 +1,7 @@
 import { applicationConfig } from "@/lib/config";
 
 export interface Project { id: string; name: string; status: string; memory: string; test_command: string | null; app_command: string | null }
-export interface Repository { id: string; project_id: string; name: string; path: string; default_branch: string }
+export interface Repository { id: string; project_id: string; name: string; path: string; host_path: string | null; default_branch: string }
 export interface RepositoryDetail extends Repository { branch: string; commit_sha: string; clean: boolean; technology: string[] }
 export interface Objective { id: string; project_id: string; title: string; description: string | null; status: string }
 export interface ObjectiveAttachment { id: string; objective_id: string; filename: string; content_type: string; size_bytes: number; created_at: string }

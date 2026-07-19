@@ -8,15 +8,18 @@ import {
   type CommandRun,
   type ProjectRuntime,
 } from "@/features/catalog/api";
+import { OpenInVsCode } from "@/features/catalog/open-in-vscode";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 
 export function ProjectRuntimePanel({
   projectId,
   repositoryId,
+  repositoryHostPath,
   token,
 }: {
   projectId: string;
   repositoryId: string;
+  repositoryHostPath: string | null;
   token: string;
 }) {
   const [runtime, setRuntime] = useState<ProjectRuntime | null>(null);
@@ -91,6 +94,7 @@ export function ProjectRuntimePanel({
         </p>
       )}
       <div className="mt-3 flex flex-wrap gap-2">
+        <OpenInVsCode hostPath={repositoryHostPath} />
         <button
           disabled={busy !== null || testsActive || !runtime?.effective_test_command}
           onClick={() => void runTests()}
