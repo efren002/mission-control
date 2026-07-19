@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import asyncio
@@ -143,7 +144,13 @@ def _provider_blocker(output: str) -> str | None:
     return final_message or "Provider reported that execution was blocked"
 
 
-async def _fail_run(run: Run, objective: Objective, failed_task: Task, detail: str) -> None:
+async def _fail_run(
+    run: Run,
+    objective: Objective,
+    failed_task: Task,
+    detail: str,
+    checkpoint_sha: str | None = None,
+) -> None:
     async with async_session_factory() as session:
         stored_run = await session.get(Run, run.id)
         stored_objective = await session.get(Objective, objective.id)
@@ -151,6 +158,8 @@ async def _fail_run(run: Run, objective: Objective, failed_task: Task, detail: s
         if stored_run is None or stored_objective is None or stored_task is None:
             return
         stored_task.status = "failed"
+        if checkpoint_sha is not None:
+            stored_task.checkpoint_sha = checkpoint_sha
         remaining = list(
             await session.scalars(
                 select(Task).where(
@@ -168,7 +177,11 @@ async def _fail_run(run: Run, objective: Objective, failed_task: Task, detail: s
             session,
             stored_run.id,
             "execution.failed",
-            {"task_id": str(stored_task.id), "detail": detail[:2000]},
+            {
+                "task_id": str(stored_task.id),
+                "detail": detail[:2000],
+                **({"checkpoint_sha": checkpoint_sha} if checkpoint_sha else {}),
+            },
         )
         await session.commit()
 
@@ -535,6 +548,18 @@ async def _execute(run_id: uuid.UUID) -> None:
             if attempt == 1:
                 feedback = failure
                 continue
+            # Commit whatever the failed attempts left behind so the partial
+            # work stays reviewable and revertable instead of leaking into the
+            # next mission's baseline checkpoint.
+            failure_sha, failure_checkpoint_error = await _checkpoint(
+                workspace,
+                f"Task {len(completed_titles) + 1} (failed): {task_title}"[:200],
+            )
+            if failure_checkpoint_error is not None:
+                failure = (
+                    f"{failure}\n\nThe task's partial changes could not be "
+                    f"checkpointed: {failure_checkpoint_error}"
+                )
             async with async_session_factory() as session:
                 failed_invocation = await session.get(AgentInvocation, invocation_id)
                 if failed_invocation is not None:
@@ -550,7 +575,9 @@ async def _execute(run_id: uuid.UUID) -> None:
                 failed_objective = await session.get(Objective, objective_id)
                 failed_task = await session.get(Task, task_id)
             if failed_run and failed_objective and failed_task:
-                await _fail_run(failed_run, failed_objective, failed_task, failure)
+                await _fail_run(
+                    failed_run, failed_objective, failed_task, failure, failure_sha
+                )
             return
 
         checkpoint_message = f"Task {len(completed_titles) + 1}: {task_title}"[:200]

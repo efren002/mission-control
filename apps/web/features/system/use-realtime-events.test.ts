@@ -1,7 +1,10 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useRealtimeEvents } from "@/features/system/use-realtime-events";
+import {
+  resetRealtimeEventsForTesting,
+  useRealtimeEvents,
+} from "@/features/system/use-realtime-events";
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -29,7 +32,10 @@ describe("useRealtimeEvents", () => {
     vi.stubGlobal("WebSocket", FakeWebSocket);
   });
 
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    resetRealtimeEventsForTesting();
+    vi.unstubAllGlobals();
+  });
 
   it("collects a newest-first feed and skips keepalives", () => {
     const { result } = renderHook(() => useRealtimeEvents());
@@ -63,5 +69,35 @@ describe("useRealtimeEvents", () => {
 
     expect(result.current.events).toHaveLength(20);
     expect(result.current.events[0].type).toBe("task.started.24");
+  });
+
+  it("shares one connection across consumers", () => {
+    const first = renderHook(() => useRealtimeEvents());
+    const second = renderHook(() => useRealtimeEvents());
+    const socket = FakeWebSocket.instances[0];
+
+    act(() => {
+      socket.onopen?.();
+      socket.receive({ type: "run.created", source: "workflow" });
+    });
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(first.result.current.events).toHaveLength(1);
+    expect(second.result.current.events).toEqual(first.result.current.events);
+  });
+
+  it("keeps the connection open across a quick remount", () => {
+    vi.useFakeTimers();
+    try {
+      const first = renderHook(() => useRealtimeEvents());
+      first.unmount();
+      renderHook(() => useRealtimeEvents());
+      act(() => {
+        vi.advanceTimersByTime(5_000);
+      });
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

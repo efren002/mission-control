@@ -105,8 +105,10 @@ async def revert_task(
     task = await session.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    if task.status != "completed":
-        raise HTTPException(status_code=409, detail="Only completed tasks can be reverted")
+    if task.status not in {"completed", "failed"}:
+        raise HTTPException(
+            status_code=409, detail="Only completed or failed tasks can be reverted"
+        )
     if not task.checkpoint_sha:
         raise HTTPException(status_code=409, detail="No checkpoint was recorded for this task")
     run = await session.get(Run, task.run_id) if task.run_id else None

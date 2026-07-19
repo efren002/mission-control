@@ -1,0 +1,9 @@
+{
+  "name": "mission-control-verify",
+  "private": true,
+  "type": "module",
+  "description": "Browser-driving harness for end-to-end verification. Not part of the app.",
+  "devDependencies": {
+    "playwright": "1.61.1"
+  }
+}

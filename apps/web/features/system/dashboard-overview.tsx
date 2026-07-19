@@ -52,6 +52,27 @@ const emptySummary: WorkflowSummary = {
   runsHolding: 0,
 };
 
+const FEED_HIDDEN_KEYS = new Set([
+  "type",
+  "source",
+  "run_id",
+  "timestamp",
+  "receivedAt",
+]);
+
+function describeEventPayload(event: Record<string, unknown>): string {
+  return Object.entries(event)
+    .filter(
+      ([key, value]) =>
+        !FEED_HIDDEN_KEYS.has(key) &&
+        (typeof value === "string" ||
+          typeof value === "number" ||
+          typeof value === "boolean"),
+    )
+    .map(([key, value]) => `${key}=${String(value).slice(0, 80)}`)
+    .join(" ");
+}
+
 function HealthRow({
   label,
   state,
@@ -369,23 +390,31 @@ export function DashboardOverview() {
             <p className="mt-4 text-dim">Listening for events...</p>
           ) : (
             <div className="mt-4 max-h-48 space-y-1.5 overflow-y-auto">
-              {realtime.events.map((event, index) => (
-                <div
-                  key={`${event.receivedAt}-${index}`}
-                  className="flex items-baseline gap-3"
-                >
-                  <span className="shrink-0 text-[#55524c]">
-                    {new Date(event.receivedAt).toLocaleTimeString()}
-                  </span>
-                  <span className="truncate text-phosphor">
-                    {event.type}
-                    {event.source ? ` :: ${event.source}` : ""}
-                    {typeof event.run_id === "string"
-                      ? ` :: run ${event.run_id.slice(0, 8)}`
-                      : ""}
-                  </span>
-                </div>
-              ))}
+              {realtime.events.map((event, index) => {
+                const detail = describeEventPayload(event);
+                return (
+                  <div
+                    key={`${event.receivedAt}-${index}`}
+                    className="flex items-baseline gap-3"
+                  >
+                    <span className="shrink-0 text-[#55524c]">
+                      {new Date(event.receivedAt).toLocaleTimeString()}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="text-phosphor">
+                        {event.type}
+                        {event.source ? ` :: ${event.source}` : ""}
+                        {typeof event.run_id === "string"
+                          ? ` :: run ${event.run_id.slice(0, 8)}`
+                          : ""}
+                      </span>
+                      {detail ? (
+                        <span className="ml-3 break-all text-dim">{detail}</span>
+                      ) : null}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

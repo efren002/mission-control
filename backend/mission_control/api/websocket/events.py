@@ -36,7 +36,11 @@ async def event_stream(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": "system.keepalive", "source": "api"})
                 continue
             data = message["data"]
-            await websocket.send_json(json.loads(data) if isinstance(data, str) else data)
+            try:
+                payload = json.loads(data) if isinstance(data, str) else data
+            except json.JSONDecodeError:
+                continue
+            await websocket.send_json(payload)
             await asyncio.sleep(0)
     except WebSocketDisconnect:
         pass

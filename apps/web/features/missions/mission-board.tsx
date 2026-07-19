@@ -937,7 +937,9 @@ export function MissionDetail({
                 <p className="mt-1 break-words text-[10px] leading-4 text-dim">
                   {task.description || "No description"}
                 </p>
-                {runFinished && task.status === "completed" && task.checkpoint_sha && (
+                {runFinished &&
+                  ["completed", "failed"].includes(task.status) &&
+                  task.checkpoint_sha && (
                   <button
                     disabled={actionBusy}
                     onClick={() => void undo(task.id, task.title)}

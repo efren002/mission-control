@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from mission_control.api.v1 import auth, runs
+from mission_control.api.v1 import tasks as tasks_api
 from mission_control.api.v1.agents import agent_counts
 from mission_control.api.v1.runs import ExecutionRequest
 from mission_control.application.services.agents import DEFAULT_AGENT_PROFILES
@@ -632,6 +633,63 @@ def test_resumed_execution_skips_completed_tasks() -> None:
 
     assert completed_titles == ["Already checkpointed"]
     assert remaining_tasks == [interrupted]
+
+
+def test_failed_task_with_checkpoint_can_be_reverted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    objective_id = uuid.uuid4()
+    run = Run(
+        id=uuid.uuid4(),
+        objective_id=objective_id,
+        repository_id=uuid.uuid4(),
+        status="failed",
+        current_step="execution_failed",
+    )
+    task = Task(
+        id=uuid.uuid4(),
+        objective_id=objective_id,
+        run_id=run.id,
+        title="Broken step",
+        status="failed",
+        agent_role="developer",
+        checkpoint_sha="a" * 40,
+    )
+    repository = Repository(id=run.repository_id, name="demo", path="/repos/demo")
+    session = AsyncMock()
+    session.get.side_effect = [task, run, repository]
+
+    async def no_event(*_: object, **__: object) -> None:
+        return None
+
+    client = MagicMock()
+    client.git_revert = AsyncMock(return_value="b" * 40)
+    monkeypatch.setattr(tasks_api, "append_run_event", no_event)
+    monkeypatch.setattr(tasks_api, "provider_workspace", lambda _: "/workspaces/demo")
+    monkeypatch.setattr(tasks_api, "ProviderGatewayClient", lambda: client)
+
+    response = asyncio.run(tasks_api.revert_task(task.id, "admin", session))
+
+    assert task.status == "reverted"
+    assert response.status == "reverted"
+    client.git_revert.assert_awaited_once_with("/workspaces/demo", "a" * 40)
+
+
+def test_only_completed_or_failed_tasks_can_be_reverted() -> None:
+    task = Task(
+        id=uuid.uuid4(),
+        objective_id=uuid.uuid4(),
+        title="Pending step",
+        status="planned",
+        agent_role="developer",
+    )
+    session = AsyncMock()
+    session.get.return_value = task
+
+    with pytest.raises(HTTPException, match="completed or failed") as error:
+        asyncio.run(tasks_api.revert_task(task.id, "admin", session))
+
+    assert error.value.status_code == 409
 
 
 def test_execution_actor_is_scoped_to_one_long_provider_task() -> None:

@@ -169,7 +169,9 @@ Execution edits the selected repository mounted from `REPOSITORY_HOST_ROOT`; the
 shown in Runs and Repositories is where the resulting project can be opened on the host. Agents
 never run `git commit` themselves; instead, Mission Control saves a checkpoint commit (authored
 as "Mission Control") after every completed task, plus one before execution when the working tree
-already had changes. Each task's diff is available from **View changes** on the Missions screen
+already had changes. When a task fails for good, its partial changes are also committed (as
+"Task N (failed): ...") so they stay attributed to that task instead of leaking into the next
+mission's baseline. Each task's diff is available from **View changes** on the Missions screen
 (or `GET /api/v1/tasks/{id}/diff`), and any checkpoint can be rolled back with normal Git tools,
 for example `git revert <sha>`. After a run finishes, **Undo this task** on the Missions screen
 (or `POST /api/v1/tasks/{id}/revert`) creates that revert commit for you; the undo is refused if
