@@ -11,9 +11,9 @@ Local-first orchestration platform for supervised AI software-development workfl
 ## Current scope
 
 This repository contains a Next.js dashboard, FastAPI API, Dramatiq workers, PostgreSQL,
-Redis, migrations, health monitoring, realtime transport, and an isolated provider gateway
-for Claude Code and Codex CLI. Approved execution runs can edit registered repositories and
-record Git checkpoint commits through the provider gateway.
+Redis, migrations, health monitoring, authenticated realtime transport, durable job dispatch,
+and an isolated provider gateway for Claude Code and Codex CLI. Approved execution runs can edit
+registered repositories and record Git checkpoint commits through the provider gateway.
 
 ## Requirements
 
@@ -136,9 +136,18 @@ Docker volumes and are intentionally never stored through the dashboard.
 
 ![Settings page](docs/settings-page.png)
 
-## Run the Codex planner
+## Run the planner
 
-After creating an objective, press `Plan`. The API returns immediately and the Dramatiq worker invokes Codex through the provider gateway in read-only mode. Generated tasks appear at <http://localhost:3000/tasks>. A successful plan moves the objective and run to `awaiting_approval`; no files are edited and no Git operations are performed.
+After creating an objective, press `Plan`. The API returns immediately and the Dramatiq worker
+invokes the configured planner through the provider gateway in read-only mode. Generated tasks
+appear at <http://localhost:3000/tasks>. A successful plan moves the objective and run to
+`awaiting_approval`; no files are edited and no Git operations are performed.
+
+Planning and project-test jobs are first committed to a PostgreSQL dispatch outbox in the same
+transaction as their workflow state. The API retries pending outbox records every five seconds.
+If Redis is temporarily unavailable, the mission remains durably queued instead of becoming
+permanently stuck. On startup, the dispatcher also reconstructs missing jobs for legacy
+`planning` runs and `queued` test commands. Actor state claims make duplicate delivery safe.
 
 ![Tasks page](docs/tasks-page.png)
 
@@ -183,6 +192,11 @@ attempt is automatically retried once with the failure fed back to the agent; on
 failure stops the run and blocks the remaining tasks so partial changes can be inspected before
 retrying manually.
 
+Provider and shell commands run in their own process groups. If the API worker disconnects, the
+request is aborted, or the configured timeout expires, the gateway terminates the entire process
+group and escalates to `SIGKILL` after two seconds. This prevents an abandoned provider from
+continuing to edit a repository while an operator resumes the mission.
+
 Provider invocations retain up to 4,000 characters of input and output by default. This can be
 disabled in **Settings**. Output from invocations created before retention was enabled cannot be
 recovered.
@@ -212,13 +226,35 @@ them, and at most ten apps can run concurrently with the default Compose port ra
 `PROVIDER_GATEWAY_APP_PORT_RANGE` and the matching `ports` mapping in `compose.yaml` together if
 you need a different range.
 
-If the stack was already running before Phase 4, rebuild it so the worker loads the planner actor and the `tasks` migration:
+### Command trust boundary
+
+Test and preview commands execute repository-controlled scripts. The current local-first gateway
+runs those commands as the same non-root container user that owns the provider CLI configuration.
+Only register repositories and run commands you trust; a malicious test script or dependency
+could read files available to that user or make outbound network requests. Do not expose preview
+ports beyond localhost.
+
+Separating provider credentials, tests, and previews into different ephemeral runner containers
+is planned hardening and is not implemented yet.
+
+## Upgrade an existing checkout
+
+Pull the new source, rebuild the affected services, and apply migrations:
 
 ```bash
-docker compose up -d --build migrate worker api web
+docker compose build migrate provider-gateway
+docker compose run --rm migrate
+docker compose up -d --build api worker web provider-gateway
 ```
 
-Both commands are interactive. If a browser cannot reach the container callback, copy the displayed URL or code into your host browser and paste the result back into the terminal. Claude also supports `claude setup-token` for a long-lived subscription OAuth token in automation, but do not commit that token to `.env` or source control.
+The dispatch migration creates the durable outbox. The state-invariant migration adds database
+constraints for workflow statuses, agent roles/providers, pending approvals, and concurrent test
+runs. Both migrations use transactional PostgreSQL DDL.
+
+Provider login commands are interactive. If a browser cannot reach the container callback, copy
+the displayed URL or code into your host browser and paste the result back into the terminal.
+Claude also supports `claude setup-token` for a long-lived subscription OAuth token in
+automation, but do not commit that token to `.env` or source control.
 
 Check provider availability:
 
@@ -246,6 +282,22 @@ curl -N -X POST http://localhost:8100/v1/execute/stream \
 ```
 
 The response is Server-Sent Events with `started`, `stdout`, `stderr`, and `completed` events.
+Completion metadata reports timeout and client-disconnect cancellation separately.
+
+## Reliability and security model
+
+- REST routes require `LOCAL_ADMIN_TOKEN`, except liveness/health and the guarded development
+  auto-login endpoint.
+- The realtime WebSocket requires an allowed origin and the admin token in the
+  `Sec-WebSocket-Protocol` header. The token is not placed in the WebSocket URL.
+- The gateway requires its separate `PROVIDER_GATEWAY_TOKEN`, validates canonical workspace
+  paths under `/workspaces`, and runs without a Docker socket.
+- Planning is read-only. Repository writes require the global write setting plus the configured
+  approval gates.
+- Workflow status values and important concurrency rules are enforced in PostgreSQL as well as
+  in application code.
+- Planning and test publication survives Redis interruptions through the transactional outbox.
+- Git checkpoints make completed and failed task changes attributable and reversible.
 
 ## Common commands
 
@@ -261,11 +313,13 @@ make down
 
 - `api` accepts input and delegates application behavior.
 - `worker` executes durable background work through Dramatiq.
+- `dispatch_jobs` is the PostgreSQL outbox between committed workflow state and Redis delivery.
 - `domain` remains independent of FastAPI, SQLAlchemy, Redis, and AI providers.
 - `application/ports` defines execution and provider contracts.
 - `infrastructure` implements external integrations.
-- Real AI tasks will run in disposable, non-root runner containers with worktrees mounted explicitly.
+- The provider gateway is a dedicated non-root container with explicitly mounted workspaces.
 - Planning is read-only. Repository editing is available only through the execution state machine,
   with the global write setting enabled and (by default) a separate execution approval.
 
-The general worker must never receive an unrestricted Docker socket or production credentials.
+The API and worker never receive an unrestricted Docker socket. Test/preview isolation from
+provider credential storage remains an explicit future hardening boundary.
