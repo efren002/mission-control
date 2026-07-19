@@ -16,7 +16,10 @@ from mission_control.application.services.settings import get_workflow_settings
 from mission_control.core.security import require_local_admin
 from mission_control.infrastructure.database.models import Agent, AgentInvocation, Task
 from mission_control.infrastructure.database.session import get_session
-from mission_control.infrastructure.providers.gateway_client import ProviderGatewayClient
+from mission_control.infrastructure.providers.gateway_client import (
+    ProviderGatewayClient,
+    ProviderResult,
+)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -65,7 +68,16 @@ class InvocationResponse(BaseModel):
     task_id: uuid.UUID | None
     purpose: str
     status: str
+    provider: str | None
+    model: str | None
+    attempt: int
+    fallback_from_provider: str | None
+    routing_reason: str | None
     duration_ms: int | None
+    input_tokens: int | None
+    cached_input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
     input_excerpt: str | None
     output_excerpt: str | None
     error: str | None
@@ -189,6 +201,8 @@ async def delete_agent(agent_id: uuid.UUID, _: Admin, session: Session) -> Respo
         await AgentService(session).delete(agent_id)
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -209,23 +223,39 @@ async def test_agent(agent_id: uuid.UUID, _: Admin, session: Session) -> Invocat
         agent_id=agent.id,
         purpose="connectivity_test",
         status="running",
+        provider=agent.provider,
+        model=agent.model,
+        attempt=1,
+        routing_reason="agent_preference",
         input_excerpt=prompt[-4000:] if workflow["retain_invocation_output"] else None,
     )
     session.add(invocation)
     await session.flush()
     started_at = time.monotonic()
     try:
-        output = await ProviderGatewayClient().execute(
+        result = await ProviderGatewayClient().execute_result(
             agent.provider,
             prompt,
             model=agent.model,
             timeout_seconds=min(int(workflow["provider_timeout_seconds"]), 120),
             usage_label=f"Connectivity test · {agent.name}"[:160],
+            sandbox_id=f"agent-{agent.id}",
         )
+        output = result.output
+        invocation.input_tokens = result.input_tokens
+        invocation.cached_input_tokens = result.cached_input_tokens
+        invocation.output_tokens = result.output_tokens
+        invocation.total_tokens = result.total_tokens
         invocation.status = "completed"
         if workflow["retain_invocation_output"]:
             invocation.output_excerpt = output[-4000:]
     except Exception as error:
+        error_result = getattr(error, "result", None)
+        if isinstance(error_result, ProviderResult):
+            invocation.input_tokens = error_result.input_tokens
+            invocation.cached_input_tokens = error_result.cached_input_tokens
+            invocation.output_tokens = error_result.output_tokens
+            invocation.total_tokens = error_result.total_tokens
         invocation.status = "failed"
         invocation.error = str(error)[:4000]
     invocation.duration_ms = int((time.monotonic() - started_at) * 1000)

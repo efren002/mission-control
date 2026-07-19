@@ -1,10 +1,21 @@
 import { existsSync } from "node:fs";
-import { realpath } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { createServer } from "node:http";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 
-import { gitCheckpoint, gitRevert } from "./git.mjs";
+import {
+  gitCheckpoint,
+  gitCreateTaskWorktree,
+  gitCreateWorktree,
+  gitIntegrateTaskWorktree,
+  gitIntegrateWorktree,
+  gitPrepareTaskResolution,
+  gitRevert,
+  gitTaskWorktreeReport,
+} from "./git.mjs";
 import {
   cancelLogin,
   getLogin,
@@ -22,6 +33,17 @@ import {
 const PORT = Number(process.env.PROVIDER_GATEWAY_PORT ?? 8100);
 const TOKEN = process.env.PROVIDER_GATEWAY_TOKEN ?? "";
 const WORKSPACE_ROOT = resolve(process.env.PROVIDER_GATEWAY_WORKSPACE_ROOT ?? "/workspaces");
+const WORKTREE_ROOT = resolve(process.env.PROVIDER_GATEWAY_WORKTREE_ROOT ?? join(WORKSPACE_ROOT, "worktrees"));
+if (
+  WORKTREE_ROOT === WORKSPACE_ROOT ||
+  relative(WORKSPACE_ROOT, WORKTREE_ROOT).startsWith(`..${sep}`)
+) {
+  throw new Error("Provider worktree root must be inside the workspace root");
+}
+const RUNTIME_ONLY = process.env.PROVIDER_GATEWAY_RUNTIME_ONLY === "true";
+const SANDBOX_SUPERVISOR_URL = (process.env.SANDBOX_SUPERVISOR_URL ?? "").replace(/\/$/, "");
+const SANDBOX_SUPERVISOR_TOKEN = process.env.SANDBOX_SUPERVISOR_TOKEN ?? "";
+const SANDBOX_REQUIRED = process.env.SANDBOX_REQUIRED === "true";
 const MAX_BODY_BYTES = 128 * 1024;
 const MAX_PROMPT_CHARS = 100_000;
 const MAX_OUTPUT_CHARS = 2_000_000;
@@ -135,10 +157,29 @@ function parsePortRange(raw) {
   return { start, end };
 }
 
-function commandEnvironment(port) {
+async function createRuntimeHome(kind) {
+  const home = await mkdtemp(join(tmpdir(), `mission-control-${kind}-`));
+  const temporaryDirectory = join(home, "tmp");
+  await mkdir(temporaryDirectory, { recursive: true });
+  return { home, temporaryDirectory };
+}
+
+async function cleanupRuntimeHome(home) {
+  try {
+    await rm(home, { recursive: true, force: true });
+  } catch (error) {
+    console.warn(`Unable to remove temporary runtime home ${home}:`, error);
+  }
+}
+
+function commandEnvironment(port, runtimeHome = "/home/runner", temporaryDirectory = "/tmp") {
   return {
     PATH: process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    HOME: "/home/runner",
+    HOME: runtimeHome,
+    TMPDIR: temporaryDirectory,
+    XDG_CACHE_HOME: join(runtimeHome, ".cache"),
+    NPM_CONFIG_CACHE: join(runtimeHome, ".npm"),
+    COMPOSER_HOME: join(runtimeHome, ".composer"),
     LANG: "C.UTF-8",
     TERM: "dumb",
     CI: "1",
@@ -228,6 +269,122 @@ async function resolveSafeWorkspace(candidate) {
 function writeEvent(response, event, data) {
   if (response.writableEnded) return;
   response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+async function sandboxHealth() {
+  if (!SANDBOX_SUPERVISOR_URL) {
+    return {
+      status: SANDBOX_REQUIRED ? "unavailable" : "disabled",
+      required: SANDBOX_REQUIRED,
+    };
+  }
+  try {
+    const response = await fetch(`${SANDBOX_SUPERVISOR_URL}/health`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    const payload = await response.json();
+    return {
+      status: response.ok ? "operational" : "unavailable",
+      required: SANDBOX_REQUIRED,
+      ...(payload && typeof payload === "object" ? payload : {}),
+    };
+  } catch (error) {
+    return {
+      status: "unavailable",
+      required: SANDBOX_REQUIRED,
+      detail: error instanceof Error ? error.message : "Sandbox supervisor unavailable",
+    };
+  }
+}
+
+async function sandboxInventory() {
+  if (!SANDBOX_SUPERVISOR_URL) {
+    return {
+      status: SANDBOX_REQUIRED ? "unavailable" : "disabled",
+      required: SANDBOX_REQUIRED,
+      activeSandboxes: [],
+    };
+  }
+  const headers = {
+    authorization: `Bearer ${SANDBOX_SUPERVISOR_TOKEN}`,
+  };
+  const [healthResponse, listResponse] = await Promise.all([
+    fetch(`${SANDBOX_SUPERVISOR_URL}/health`, {
+      signal: AbortSignal.timeout(3_000),
+    }),
+    fetch(`${SANDBOX_SUPERVISOR_URL}/v1/sandboxes`, {
+      headers,
+      signal: AbortSignal.timeout(3_000),
+    }),
+  ]);
+  if (!healthResponse.ok || !listResponse.ok) {
+    throw new Error("Sandbox supervisor is unavailable");
+  }
+  const health = await healthResponse.json();
+  const listed = await listResponse.json();
+  return {
+    ...health,
+    status: "operational",
+    required: SANDBOX_REQUIRED,
+    executionIsolation: "disposable-container",
+    activeSandboxes: Array.isArray(listed.sandboxes) ? listed.sandboxes : [],
+  };
+}
+
+function sandboxIdentity(value) {
+  if (typeof value === "string" && /^[a-z0-9][a-z0-9-]{0,79}$/i.test(value)) {
+    return value.toLowerCase();
+  }
+  return `request-${randomUUID()}`;
+}
+
+async function relaySandbox(request, response, body, onEvent) {
+  if (!SANDBOX_SUPERVISOR_URL) {
+    throw new Error("Sandbox supervisor is not configured");
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  request.once("aborted", abort);
+  response.once("close", abort);
+  try {
+    const sandboxResponse = await fetch(
+      `${SANDBOX_SUPERVISOR_URL}/v1/sandboxes/run`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${SANDBOX_SUPERVISOR_TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      },
+    );
+    if (!sandboxResponse.ok || !sandboxResponse.body) {
+      const payload = await sandboxResponse.json().catch(() => null);
+      throw new Error(payload?.detail ?? `Sandbox supervisor returned ${sandboxResponse.status}`);
+    }
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let eventName = null;
+    for await (const chunk of sandboxResponse.body) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (line.startsWith("event:")) {
+          eventName = line.slice(6).trim();
+          continue;
+        }
+        if (!line.startsWith("data:") || !eventName) continue;
+        const payload = JSON.parse(line.slice(5).trim());
+        await onEvent(eventName, payload);
+        eventName = null;
+      }
+    }
+  } finally {
+    request.off("aborted", abort);
+    response.off("close", abort);
+  }
 }
 
 function killProcessGroup(child, signal) {
@@ -459,6 +616,73 @@ async function execute(request, response, body) {
   const workspace = await resolveSafeWorkspace(body.workspace);
   const timeoutMs = Math.min(Math.max(Number(body.timeoutMs ?? DEFAULT_TIMEOUT_MS), 1_000), DEFAULT_TIMEOUT_MS);
   const { command, args } = commandFor(provider, workspace, prompt, model || null, accessMode);
+  if (SANDBOX_SUPERVISOR_URL) {
+    let stdout = "";
+    let stderr = "";
+    const startedAt = Date.now();
+    await relaySandbox(
+      request,
+      response,
+      {
+        kind: "provider",
+        provider,
+        args,
+        workspace,
+        timeoutMs,
+        sandboxId: sandboxIdentity(body.sandboxId),
+      },
+      async (event, payload) => {
+        if (event === "stdout" && typeof payload?.data === "string") {
+          stdout = `${stdout}${payload.data}`.slice(-MAX_OUTPUT_CHARS);
+        } else if (event === "stderr" && typeof payload?.data === "string") {
+          stderr = `${stderr}${payload.data}`.slice(-MAX_OUTPUT_CHARS);
+        }
+        if (event === "completed") {
+          const parsedUsage = parseProviderUsage(provider, stdout);
+          providerUsage.set(
+            provider,
+            recordProviderUsage(providerUsage.get(provider), parsedUsage),
+          );
+          recentProviderUsage.set(
+            provider,
+            [
+              {
+                label: usageLabel?.trim() || "Unlabelled request",
+                model: model || null,
+                promptChars: prompt.length,
+                inputTokens: parsedUsage?.inputTokens ?? 0,
+                cachedInputTokens: parsedUsage?.cachedInputTokens ?? 0,
+                outputTokens: parsedUsage?.outputTokens ?? 0,
+                totalTokens: parsedUsage?.totalTokens ?? 0,
+                durationMs: payload.durationMs ?? Date.now() - startedAt,
+                succeeded: payload.exitCode === 0,
+                completedAt: new Date().toISOString(),
+              },
+              ...(recentProviderUsage.get(provider) ?? []),
+            ].slice(0, MAX_RECENT_USAGE),
+          );
+          if (payload.exitCode === 0) {
+            authenticationFailures.delete(provider);
+          } else if (/401 Unauthorized|not logged in|authentication/i.test(stderr)) {
+            authenticationFailures.set(
+              provider,
+              stderr.trim().slice(-2_000) || "Provider authentication failed",
+            );
+          }
+          writeEvent(response, event, { ...payload, provider, usage: parsedUsage });
+          return;
+        }
+        writeEvent(response, event, {
+          ...payload,
+          ...(event === "started" ? { provider, workspace, command } : {}),
+        });
+      },
+    );
+    return;
+  }
+  if (SANDBOX_REQUIRED) {
+    throw new Error("Disposable sandbox execution is required but unavailable");
+  }
   const child = spawn(command, args, {
     cwd: workspace,
     env: environmentFor(provider),
@@ -529,17 +753,52 @@ async function execute(request, response, body) {
         durationMs: Date.now() - startedAt,
         stdoutBytes: Buffer.byteLength(stdout),
         stderrBytes: Buffer.byteLength(stderr),
+        usage: parsedUsage,
       });
       resolveProcess();
     });
   });
 }
 
-async function runShellCommand(request, response, { command, workspace, timeoutMs: requestedTimeoutMs }) {
+async function runSandboxCommand(request, response, body, workspace, command, timeoutMs) {
+  await relaySandbox(
+    request,
+    response,
+    {
+      kind: "command",
+      command,
+      workspace,
+      timeoutMs,
+      sandboxId: sandboxIdentity(body.sandboxId),
+    },
+    async (event, payload) => writeEvent(response, event, payload),
+  );
+}
+
+async function runShellCommand(
+  request,
+  response,
+  { command, workspace, timeoutMs: requestedTimeoutMs, sandboxId },
+) {
   const timeoutMs = Math.min(Math.max(Number(requestedTimeoutMs ?? DEFAULT_TIMEOUT_MS), 1_000), DEFAULT_TIMEOUT_MS);
+  if (SANDBOX_SUPERVISOR_URL) {
+    await runSandboxCommand(
+      request,
+      response,
+      { sandboxId },
+      workspace,
+      command,
+      timeoutMs,
+    );
+    return;
+  }
+  if (SANDBOX_REQUIRED) {
+    throw new Error("Disposable sandbox execution is required but unavailable");
+  }
+  const runtime = await createRuntimeHome("command");
   const child = spawn("sh", ["-c", command], {
     cwd: workspace,
-    env: commandEnvironment(null),
+    env: commandEnvironment(null, runtime.home, runtime.temporaryDirectory),
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
@@ -588,6 +847,7 @@ async function runShellCommand(request, response, { command, workspace, timeoutM
       resolveProcess();
     });
   });
+  await cleanupRuntimeHome(runtime.home);
 }
 
 function appPayload(workspace, entry) {
@@ -639,10 +899,11 @@ async function startApp(body) {
   const finalCommand = command
     .replaceAll("${PORT}", String(port))
     .replaceAll("$PORT", String(port));
+  const runtime = await createRuntimeHome("app");
   // detached makes sh a process-group leader so Stop can kill its children too.
   const child = spawn("sh", ["-c", finalCommand], {
     cwd: workspace,
-    env: commandEnvironment(port),
+    env: commandEnvironment(port, runtime.home, runtime.temporaryDirectory),
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
@@ -655,6 +916,7 @@ async function startApp(body) {
     status: "running",
     exitCode: null,
     logTail: "",
+    runtimeHome: runtime.home,
   };
   const append = (chunk) => {
     entry.logTail = `${entry.logTail}${chunk}`.slice(-MAX_APP_LOG_CHARS);
@@ -668,6 +930,7 @@ async function startApp(body) {
   child.on("close", (code) => {
     if (entry.status === "running") entry.status = "exited";
     entry.exitCode = code;
+    void cleanupRuntimeHome(entry.runtimeHome);
   });
   appProcesses.set(workspace, entry);
   return { statusCode: 200, payload: appPayload(workspace, entry) };
@@ -696,11 +959,31 @@ function listApps() {
 const server = createServer(async (request, response) => {
   try {
     if (request.method === "GET" && request.url === "/health") {
-      return json(response, 200, { status: "operational", service: "provider-gateway" });
+      const sandbox = await sandboxHealth();
+      const sandboxUnavailable = SANDBOX_REQUIRED && sandbox.status !== "operational";
+      return json(response, sandboxUnavailable ? 503 : 200, {
+        status: sandboxUnavailable ? "unavailable" : "operational",
+        service: RUNTIME_ONLY ? "runtime-gateway" : "provider-gateway",
+        mode: RUNTIME_ONLY ? "runtime-only" : "provider",
+        executionIsolation: sandbox.status === "operational" ? "disposable-container" : "process",
+        sandbox,
+      });
     }
     if (!authorized(request)) return json(response, 401, { detail: "Invalid gateway credentials" });
+    if (
+      RUNTIME_ONLY &&
+      request.url !== "/v1/commands/stream" &&
+      request.url !== "/v1/apps" &&
+      request.url !== "/v1/apps/start" &&
+      request.url !== "/v1/apps/stop"
+    ) {
+      return json(response, 403, { detail: "Endpoint is disabled in runtime-only mode" });
+    }
     if (request.method === "GET" && request.url === "/v1/providers") {
       return json(response, 200, { providers: await providerStatus() });
+    }
+    if (request.method === "GET" && request.url === "/v1/sandboxes") {
+      return json(response, 200, await sandboxInventory());
     }
     const loginRoute = /^\/v1\/providers\/(codex|claude)\/login(\/input)?$/.exec(request.url ?? "");
     if (loginRoute) {
@@ -734,6 +1017,84 @@ const server = createServer(async (request, response) => {
       const workspace = await resolveSafeWorkspace(body.workspace);
       return json(response, 200, await gitRevert(workspace, body.commitSha));
     }
+    if (request.method === "POST" && request.url === "/v1/git/worktrees") {
+      const body = await requestBody(request);
+      const sourceWorkspace = await resolveSafeWorkspace(body.sourceWorkspace);
+      return json(
+        response,
+        200,
+        await gitCreateWorktree(sourceWorkspace, body.runId, WORKTREE_ROOT),
+      );
+    }
+    if (request.method === "POST" && request.url === "/v1/git/worktrees/integrate") {
+      const body = await requestBody(request);
+      const sourceWorkspace = await resolveSafeWorkspace(body.sourceWorkspace);
+      const worktree = await resolveSafeWorkspace(body.worktree);
+      return json(
+        response,
+        200,
+        await gitIntegrateWorktree(
+          sourceWorkspace,
+          worktree,
+          body.branch,
+          body.baselineSha,
+        ),
+      );
+    }
+    if (request.method === "POST" && request.url === "/v1/git/task-worktrees") {
+      const body = await requestBody(request);
+      const sourceWorkspace = await resolveSafeWorkspace(body.sourceWorkspace);
+      return json(
+        response,
+        200,
+        await gitCreateTaskWorktree(sourceWorkspace, body.taskId, WORKTREE_ROOT),
+      );
+    }
+    if (request.method === "POST" && request.url === "/v1/git/task-worktrees/integrate") {
+      const body = await requestBody(request);
+      const sourceWorkspace = await resolveSafeWorkspace(body.sourceWorkspace);
+      const worktree = await resolveSafeWorkspace(body.worktree);
+      return json(
+        response,
+        200,
+        await gitIntegrateTaskWorktree(
+          sourceWorkspace,
+          worktree,
+          body.branch,
+          body.baselineSha,
+        ),
+      );
+    }
+    if (request.method === "POST" && request.url === "/v1/git/task-worktrees/report") {
+      const body = await requestBody(request);
+      const sourceWorkspace = await resolveSafeWorkspace(body.sourceWorkspace);
+      const worktree = await resolveSafeWorkspace(body.worktree);
+      return json(
+        response,
+        200,
+        await gitTaskWorktreeReport(
+          sourceWorkspace,
+          worktree,
+          body.branch,
+          body.baselineSha,
+        ),
+      );
+    }
+    if (request.method === "POST" && request.url === "/v1/git/task-worktrees/resolve") {
+      const body = await requestBody(request);
+      const sourceWorkspace = await resolveSafeWorkspace(body.sourceWorkspace);
+      const worktree = await resolveSafeWorkspace(body.worktree);
+      return json(
+        response,
+        200,
+        await gitPrepareTaskResolution(
+          sourceWorkspace,
+          worktree,
+          body.branch,
+          body.baselineSha,
+        ),
+      );
+    }
     if (request.method === "POST" && ["/v1/execute", "/v1/execute/stream"].includes(request.url)) {
       const body = await requestBody(request);
       response.writeHead(200, {
@@ -754,7 +1115,12 @@ const server = createServer(async (request, response) => {
         "cache-control": "no-cache, no-store",
         connection: "keep-alive",
       });
-      await runShellCommand(request, response, { command, workspace, timeoutMs: body.timeoutMs });
+      await runShellCommand(request, response, {
+        command,
+        workspace,
+        timeoutMs: body.timeoutMs,
+        sandboxId: body.sandboxId,
+      });
       response.end();
       return;
     }
@@ -773,7 +1139,10 @@ const server = createServer(async (request, response) => {
     }
     return json(response, 404, { detail: "Not found" });
   } catch (error) {
-    if (!response.headersSent) return json(response, 400, { detail: error instanceof Error ? error.message : "Request failed" });
+    if (!response.headersSent) return json(response, 400, {
+      detail: error instanceof Error ? error.message : "Request failed",
+      ...(Array.isArray(error?.conflictFiles) ? { conflictFiles: error.conflictFiles } : {}),
+    });
     writeEvent(response, "error", { detail: error instanceof Error ? error.message : "Request failed" });
     response.end();
   }

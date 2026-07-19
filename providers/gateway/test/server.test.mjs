@@ -49,6 +49,7 @@ before(async () => {
       PROVIDER_GATEWAY_TOKEN: TOKEN,
       PROVIDER_GATEWAY_WORKSPACE_ROOT: workspaceRoot,
       PROVIDER_GATEWAY_APP_PORT_RANGE: APP_PORT_RANGE,
+      PROVIDER_GATEWAY_RUNTIME_ONLY: "true",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -78,6 +79,18 @@ test("commands/stream requires gateway credentials", async () => {
   assert.equal(response.status, 401);
 });
 
+test("runtime-only mode rejects provider execution", async () => {
+  const response = await request("/v1/execute", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "codex",
+      workspace,
+      prompt: "Do nothing",
+    }),
+  });
+  assert.equal(response.status, 403);
+});
+
 test("commands/stream streams stdout and completes with the exit code", async () => {
   const response = await request("/v1/commands/stream", {
     method: "POST",
@@ -90,6 +103,40 @@ test("commands/stream streams stdout and completes with the exit code", async ()
   assert.match(stdout, /tests-passed/);
   assert.equal(completed.data.exitCode, 0);
   assert.equal(completed.data.timedOut, false);
+});
+
+test("project commands do not inherit gateway or provider credential variables", async () => {
+  const response = await request("/v1/commands/stream", {
+    method: "POST",
+    body: JSON.stringify({
+      workspace,
+      command:
+        "test -z \"${PROVIDER_GATEWAY_TOKEN:-}\" && " +
+        "test -z \"${CODEX_HOME:-}\" && test -z \"${CLAUDE_CONFIG_DIR:-}\"",
+    }),
+  });
+  const events = parseEvents(await response.text());
+  const completed = events.find((item) => item.event === "completed");
+  assert.equal(completed.data.exitCode, 0);
+});
+
+test("project commands receive a temporary home that is removed after exit", async () => {
+  const response = await request("/v1/commands/stream", {
+    method: "POST",
+    body: JSON.stringify({
+      workspace,
+      command: "printf '%s\\n%s' \"$HOME\" \"$TMPDIR\"",
+    }),
+  });
+  const events = parseEvents(await response.text());
+  const stdout = events
+    .filter((item) => item.event === "stdout")
+    .map((item) => item.data.data)
+    .join("");
+  const [runtimeHome, runtimeTmp] = stdout.trim().split("\n");
+  assert.match(runtimeHome, /mission-control-command-/);
+  assert.equal(runtimeTmp, join(runtimeHome, "tmp"));
+  assert.equal(existsSync(runtimeHome), false);
 });
 
 test("commands/stream reports a failing command", async () => {
@@ -142,7 +189,10 @@ test("commands/stream terminates the process group when the client disconnects",
 test("apps lifecycle: start substitutes the port, blocks duplicates, stops cleanly", async () => {
   const started = await request("/v1/apps/start", {
     method: "POST",
-    body: JSON.stringify({ workspace, command: "echo serving on $PORT; sleep 30" }),
+    body: JSON.stringify({
+      workspace,
+      command: "echo runtime-home=$HOME; echo serving on $PORT; sleep 30",
+    }),
   });
   assert.equal(started.status, 200);
   const startedPayload = await started.json();
@@ -158,11 +208,20 @@ test("apps lifecycle: start substitutes the port, blocks duplicates, stops clean
   });
   assert.equal(duplicate.status, 409);
 
-  const listed = await request("/v1/apps");
-  const listedPayload = await listed.json();
+  let listedPayload;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const listed = await request("/v1/apps");
+    listedPayload = await listed.json();
+    if (listedPayload.apps[0]?.logTail.includes("runtime-home=")) break;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+  }
   assert.equal(listedPayload.apps.length, 1);
   assert.equal(listedPayload.apps[0].workspace, workspace);
   assert.equal(listedPayload.apps[0].status, "running");
+  const runtimeHome = /runtime-home=(\S+)/.exec(listedPayload.apps[0].logTail)?.[1];
+  assert.ok(runtimeHome);
+  assert.match(runtimeHome, /mission-control-app-/);
+  assert.equal(existsSync(runtimeHome), true);
 
   const stopped = await request("/v1/apps/stop", {
     method: "POST",
@@ -171,6 +230,10 @@ test("apps lifecycle: start substitutes the port, blocks duplicates, stops clean
   assert.equal(stopped.status, 200);
   const stoppedPayload = await stopped.json();
   assert.equal(stoppedPayload.status, "stopped");
+  for (let attempt = 0; attempt < 50 && existsSync(runtimeHome); attempt += 1) {
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+  }
+  assert.equal(existsSync(runtimeHome), false);
 
   const restarted = await request("/v1/apps/start", {
     method: "POST",

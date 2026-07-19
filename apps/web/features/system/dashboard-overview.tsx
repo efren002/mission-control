@@ -14,10 +14,14 @@ import { useEffect, useRef, useState } from "react";
 import { StatusPill } from "@/components/status/status-pill";
 import { useAdminToken } from "@/features/auth/use-admin-token";
 import { catalogApi } from "@/features/catalog/api";
-import type { ProviderStatus } from "@/features/catalog/api";
+import type {
+  ProviderPerformance as ProviderPerformanceData,
+  ProviderStatus,
+} from "@/features/catalog/api";
 import { cn } from "@/lib/cn";
 
 import { ProviderUsage } from "./provider-usage";
+import { ProviderPerformance } from "./provider-performance";
 import { useRealtimeEvents } from "./use-realtime-events";
 import { useSystemHealth } from "./use-system-health";
 
@@ -32,6 +36,7 @@ const COMPONENT_LABELS: Record<string, string> = {
   postgres: "Database",
   redis: "Redis cache",
   provider_gateway: "Provider gateway",
+  runtime_gateway: "Runtime gateway",
 };
 
 interface WorkflowSummary {
@@ -109,13 +114,52 @@ function HealthRow({
   );
 }
 
+function RadarBackdrop() {
+  return (
+    <div className="radar-display" aria-hidden="true">
+      <span className="radar-blip radar-blip-one" />
+      <span className="radar-blip radar-blip-two" />
+      <span className="radar-blip radar-blip-three" />
+    </div>
+  );
+}
+
+const MATRIX_COLUMNS = [
+  "010011010101001101",
+  "SYSRUN2049ONLINE",
+  "110010100110101100",
+  "AGENT07LIVEUPLINK",
+  "001101011001011010",
+  "UPLINKREADYNOMINAL",
+  "101100101101001101",
+  "MISSIONCONTROLEXEC",
+  "011010010011101001",
+  "TELEMETRYSTREAM01",
+  "100101101001011010",
+  "OBJECTIVELOCKED",
+];
+
+function MatrixBackdrop() {
+  return (
+    <div className="matrix-backdrop" aria-hidden="true">
+      {MATRIX_COLUMNS.map((characters, index) => (
+        <span key={index}>{characters}</span>
+      ))}
+    </div>
+  );
+}
+
 export function DashboardOverview() {
   const health = useSystemHealth();
   const { token } = useAdminToken();
   const realtime = useRealtimeEvents(token);
   const [agentSummary, setAgentSummary] = useState({ online: 0, total: 0 });
   const [workflow, setWorkflow] = useState<WorkflowSummary>(emptySummary);
-  const [providers, setProviders] = useState<Record<string, ProviderStatus>>({});
+  const [providers, setProviders] = useState<Record<string, ProviderStatus>>(
+    {},
+  );
+  const [providerPerformance, setProviderPerformance] =
+    useState<ProviderPerformanceData | null>(null);
   const [providersLoading, setProvidersLoading] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const refreshThrottle = useRef<{ timer: number | null; lastRefresh: number }>(
@@ -151,10 +195,11 @@ export function DashboardOverview() {
     const load = async () => {
       setProvidersLoading(true);
       try {
-        const [agents, providerData, objectives, approvals, runs] =
+        const [agents, providerData, performance, objectives, approvals, runs] =
           await Promise.all([
             catalogApi.agents(token),
             catalogApi.providers(token),
+            catalogApi.providerPerformance(token),
             catalogApi.objectives(token),
             catalogApi.approvals(token),
             catalogApi.runs(token),
@@ -165,6 +210,7 @@ export function DashboardOverview() {
           total: agents.length,
         });
         setProviders(providerData.providers);
+        setProviderPerformance(performance);
         setWorkflow({
           objectivesActive: objectives.filter((objective) =>
             ACTIVE_OBJECTIVE_STATUSES.has(objective.status),
@@ -278,8 +324,8 @@ export function DashboardOverview() {
             Mission Control
           </h1>
           <p className="mt-2 max-w-2xl text-xs leading-5 text-dim">
-            The command infrastructure is initialized. Autonomous execution
-            remains locked until provider and workflow modules are deployed.
+            Supervise missions, compare provider outcomes, and inspect the
+            evidence behind every completed build.
           </p>
         </div>
         <StatusPill
@@ -296,77 +342,87 @@ export function DashboardOverview() {
 
       <section className="grid gap-4 xl:grid-cols-[1fr_minmax(240px,300px)]">
         <div className="grid gap-px border border-[#292824] bg-[#292824] sm:grid-cols-2">
-          {metrics.map(({ label, value, detail, icon: Icon, tone, meter, href }) => (
-            <Link
-              key={label}
-              href={href}
-              className="block bg-panel p-4 transition-colors hover:bg-[#151310] focus-visible:bg-[#151310] focus-visible:outline-none"
-            >
-              <div className="mb-7 flex items-center justify-between">
-                <p className="text-[9px] font-bold uppercase tracking-[0.14em] text-dim">
-                  {label}
-                </p>
-                <Icon className="h-3.5 w-3.5 text-signal" />
-              </div>
-              <p
-                className={cn(
-                  "font-mono text-3xl font-bold tracking-[-0.06em]",
-                  tone,
-                )}
+          {metrics.map(
+            ({ label, value, detail, icon: Icon, tone, meter, href }) => (
+              <Link
+                key={label}
+                href={href}
+                className="block bg-panel p-4 transition-colors hover:bg-[#151310] focus-visible:bg-[#151310] focus-visible:outline-none"
               >
-                {value}
-              </p>
-              <p className="mt-2 text-[10px] text-dim">{detail}</p>
-              {meter != null && (
-                <div className="mt-3 h-0.5 w-full bg-signal/10">
-                  <div
-                    className="h-full bg-signal"
-                    style={{ width: `${Math.round(meter * 100)}%` }}
-                  />
+                <div className="mb-7 flex items-center justify-between">
+                  <p className="text-[9px] font-bold uppercase tracking-[0.14em] text-dim">
+                    {label}
+                  </p>
+                  <Icon className="h-3.5 w-3.5 text-signal" />
                 </div>
-              )}
-            </Link>
-          ))}
+                <p
+                  className={cn(
+                    "font-mono text-3xl font-bold tracking-[-0.06em]",
+                    tone,
+                  )}
+                >
+                  {value}
+                </p>
+                <p className="mt-2 text-[10px] text-dim">{detail}</p>
+                {meter != null && (
+                  <div className="mt-3 h-0.5 w-full bg-signal/10">
+                    <div
+                      className="h-full bg-signal"
+                      style={{ width: `${Math.round(meter * 100)}%` }}
+                    />
+                  </div>
+                )}
+              </Link>
+            ),
+          )}
         </div>
 
-        <article className="control-panel p-4">
-          <div className="mb-4 flex items-center justify-between">
+        <article className="control-panel relative overflow-hidden p-4">
+          <RadarBackdrop />
+          <div className="relative z-10 mb-4 flex items-center justify-between">
             <p className="text-[9px] font-bold uppercase tracking-[0.14em] text-dim">
               System health
             </p>
             <HeartPulse className="h-3.5 w-3.5 text-signal" />
           </div>
-          <HealthRow
-            label="API gateway"
-            state={
-              health.isLoading
-                ? "scanning"
-                : health.isError
-                  ? "unavailable"
-                  : "operational"
-            }
-          />
-          {Object.entries(health.data?.components ?? {}).map(
-            ([name, component]) => (
-              <HealthRow
-                key={name}
-                label={COMPONENT_LABELS[name] ?? name}
-                state={component.status}
-              />
-            ),
-          )}
-          <HealthRow
-            label="Event stream"
-            state={
-              realtime.connectionState === "connected"
-                ? "operational"
-                : realtime.connectionState === "connecting"
+          <div className="relative z-10">
+            <HealthRow
+              label="API gateway"
+              state={
+                health.isLoading
                   ? "scanning"
-                  : "unavailable"
-            }
-          />
+                  : health.isError
+                    ? "unavailable"
+                    : "operational"
+              }
+            />
+            {Object.entries(health.data?.components ?? {}).map(
+              ([name, component]) => (
+                <HealthRow
+                  key={name}
+                  label={COMPONENT_LABELS[name] ?? name}
+                  state={component.status}
+                />
+              ),
+            )}
+            <HealthRow
+              label="Event stream"
+              state={
+                realtime.connectionState === "connected"
+                  ? "operational"
+                  : realtime.connectionState === "connecting"
+                    ? "scanning"
+                    : "unavailable"
+              }
+            />
+          </div>
         </article>
       </section>
+
+      <ProviderPerformance
+        performance={providerPerformance}
+        loading={providersLoading}
+      />
 
       <ProviderUsage providers={providers} loading={providersLoading} />
 
@@ -380,15 +436,18 @@ export function DashboardOverview() {
           </div>
           <RadioTower className="h-4 w-4 text-signal" />
         </div>
-        <div className="border border-[#292824] bg-black/30 p-4 font-mono text-[10px]">
-          <div className="flex items-center justify-between gap-3">
+        <div className="relative min-h-28 overflow-hidden border border-[#292824] bg-black/30 p-4 font-mono text-[10px]">
+          <MatrixBackdrop />
+          <div className="relative z-10 flex items-center justify-between gap-3">
             <p className="text-dim">CHANNEL mission-control.events</p>
             <p className="text-[#55524c]">uplink.{realtime.connectionState}</p>
           </div>
           {realtime.events.length === 0 ? (
-            <p className="mt-4 text-dim">Listening for events...</p>
+            <p className="relative z-10 mt-4 text-dim">
+              Listening for events...
+            </p>
           ) : (
-            <div className="mt-4 max-h-48 space-y-1.5 overflow-y-auto">
+            <div className="relative z-10 mt-4 max-h-48 space-y-1.5 overflow-y-auto">
               {realtime.events.map((event, index) => {
                 const detail = describeEventPayload(event);
                 return (
@@ -408,7 +467,9 @@ export function DashboardOverview() {
                           : ""}
                       </span>
                       {detail ? (
-                        <span className="ml-3 break-all text-dim">{detail}</span>
+                        <span className="ml-3 break-all text-dim">
+                          {detail}
+                        </span>
                       ) : null}
                     </span>
                   </div>
@@ -418,8 +479,8 @@ export function DashboardOverview() {
           )}
         </div>
         <p className="mt-4 text-[10px] leading-5 text-dim">
-          Only non-sensitive system telemetry is enabled in the boilerplate
-          environment.
+          The event feed contains operational metadata only; provider prompts
+          and credentials are excluded.
         </p>
       </section>
     </div>

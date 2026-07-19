@@ -6,6 +6,7 @@ from mission_control.api.v1.auth import router as auth_router
 from mission_control.api.v1.catalog import router as catalog_router
 from mission_control.api.v1.health import router as health_router
 from mission_control.api.v1.objectives import router as objectives_router
+from mission_control.api.v1.operations import router as operations_router
 from mission_control.api.v1.project_runtime import router as project_runtime_router
 from mission_control.api.v1.providers import router as providers_router
 from mission_control.api.v1.runs import router as runs_router
@@ -21,6 +22,7 @@ api_router.include_router(auth_router)
 api_router.include_router(health_router)
 api_router.include_router(catalog_router)
 api_router.include_router(objectives_router)
+api_router.include_router(operations_router)
 api_router.include_router(providers_router)
 api_router.include_router(project_runtime_router)
 api_router.include_router(runs_router)

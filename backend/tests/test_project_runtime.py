@@ -10,7 +10,10 @@ from httpx import ASGITransport, AsyncClient
 
 from mission_control.api.v1 import project_runtime
 from mission_control.application.services.job_dispatch import DispatchResult
-from mission_control.application.services.project_runtime import RuntimeSnapshot
+from mission_control.application.services.project_runtime import (
+    ProjectRuntimeService,
+    RuntimeSnapshot,
+)
 from mission_control.application.services.runtime_detection import (
     DetectedCommands,
     detect_commands,
@@ -18,6 +21,7 @@ from mission_control.application.services.runtime_detection import (
 from mission_control.core.security import require_local_admin
 from mission_control.infrastructure.database.models import CommandRun, Project, Repository
 from mission_control.infrastructure.database.session import get_session
+from mission_control.infrastructure.providers.gateway_client import RuntimeGatewayClient
 from mission_control.main import app, application
 
 
@@ -41,6 +45,12 @@ def test_detects_laravel_commands(tmp_path: Path) -> None:
 
     assert detected.test_command == "php artisan test"
     assert detected.app_command == "php artisan serve --host 0.0.0.0 --port $PORT"
+
+
+def test_project_runtime_defaults_to_the_credential_free_gateway() -> None:
+    service = ProjectRuntimeService(AsyncMock())
+
+    assert isinstance(service.gateway, RuntimeGatewayClient)
 
 
 @pytest.mark.asyncio

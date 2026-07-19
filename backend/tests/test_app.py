@@ -13,6 +13,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
+from mission_control.api.v1 import approvals as approvals_api
 from mission_control.api.v1 import auth, runs
 from mission_control.api.v1 import tasks as tasks_api
 from mission_control.api.v1.agents import agent_counts
@@ -31,28 +32,48 @@ from mission_control.infrastructure.database.models import (
     Agent,
     AgentInvocation,
     Approval,
+    ConflictResolutionAttempt,
     Objective,
     Project,
     Repository,
     Run,
     SystemSetting,
     Task,
+    VerificationCriterion,
+    VerificationEvidence,
 )
 from mission_control.infrastructure.git.inspector import RepositoryInspector
 from mission_control.infrastructure.providers.gateway_client import (
     ProviderExecutionError,
+    ProviderGatewayClient,
+    RuntimeGatewayClient,
+    TaskConflictReport,
+    WorktreeIntegration,
+    local_worktree_path,
     parse_gateway_events,
 )
 from mission_control.main import app, wrap_application
 from mission_control.workers.actors.executor import (
     TASK_ACTOR_TIME_LIMIT_MS,
+    VERIFICATION_ACTOR_TIME_LIMIT_MS,
+    _claimable_tasks,
+    _deterministic_gate_passed,
     _execution_progress,
     _execution_prompt,
+    _extract_verification,
     _provider_blocker,
+    _ready_tasks,
     _retry_prompt,
+    _tasks_touch_shared_files,
+    _verification_prompt,
     execute_run,
+    verify_run,
 )
-from mission_control.workers.actors.planner import _extract_tasks, _planner_prompt
+from mission_control.workers.actors.planner import (
+    _extract_plan,
+    _extract_tasks,
+    _planner_prompt,
+)
 
 
 async def exercise_application_foundation() -> tuple[int, dict[str, str], int]:
@@ -78,6 +99,56 @@ def test_application_foundation() -> None:
     assert liveness_status == 200
     assert liveness_body == {"status": "operational"}
     assert protected_status == 401
+
+
+def test_provider_and_runtime_clients_use_separate_boundaries() -> None:
+    settings = Settings(
+        _env_file=None,
+        provider_gateway_url="http://provider-gateway:8100",
+        provider_gateway_token="provider-secret",
+        runtime_gateway_url="http://runtime-gateway:8110",
+        runtime_gateway_token="runtime-secret",
+    )
+
+    provider = ProviderGatewayClient(settings)
+    runtime = RuntimeGatewayClient(settings)
+
+    assert (provider.base_url, provider.token) == (
+        "http://provider-gateway:8100",
+        "provider-secret",
+    )
+    assert (runtime.base_url, runtime.token) == (
+        "http://runtime-gateway:8110",
+        "runtime-secret",
+    )
+
+
+def test_provider_worktree_path_maps_to_the_shared_runtime_volume() -> None:
+    settings = Settings(
+        _env_file=None,
+        worktree_root="/runtime/worktrees",
+        provider_worktree_root="/workspaces/worktrees",
+    )
+
+    mapped = local_worktree_path(
+        "/workspaces/worktrees/4198f342-7b3d-4a21-8c11-63c7b229d880",
+        settings,
+    )
+
+    assert mapped == Path(
+        "/runtime/worktrees/4198f342-7b3d-4a21-8c11-63c7b229d880"
+    )
+
+
+def test_provider_worktree_path_rejects_paths_outside_the_shared_volume() -> None:
+    settings = Settings(
+        _env_file=None,
+        worktree_root="/runtime/worktrees",
+        provider_worktree_root="/workspaces/worktrees",
+    )
+
+    with pytest.raises(ValueError, match="outside"):
+        local_worktree_path("/workspaces/repositories/project", settings)
 
 
 @pytest.mark.asyncio
@@ -431,7 +502,7 @@ def test_execution_approval_is_created_before_repository_work(
     )
     session = AsyncMock()
     session.add = MagicMock()
-    session.scalar.side_effect = [run, None]
+    session.scalar.side_effect = [run, None, None]
     session.get.side_effect = [objective, project, repository]
     session.scalars.side_effect = [[task], [agent]]
     task_count_rows = MagicMock()
@@ -466,6 +537,119 @@ def test_execution_approval_is_created_before_repository_work(
     assert isinstance(added, Approval)
     assert added.kind == "execution"
     assert added.status == "pending"
+
+
+def test_approved_task_conflict_retry_resumes_the_mission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    run = Run(
+        id=uuid.uuid4(),
+        objective_id=uuid.uuid4(),
+        status="failed",
+        current_step="task_integration_failed",
+        worktree_path="/workspaces/worktrees/run",
+        worktree_status="preserved",
+    )
+    objective = Objective(
+        id=run.objective_id,
+        project_id=uuid.uuid4(),
+        title="Conflict mission",
+        status="failed",
+    )
+    task = Task(
+        id=uuid.uuid4(),
+        objective_id=objective.id,
+        run_id=run.id,
+        position=1,
+        depends_on_positions=[],
+        title="Conflicting task",
+        status="failed",
+        worktree_path="/workspaces/worktrees/tasks/task",
+        worktree_branch=f"mission-control/task-{uuid.uuid4()}",
+        worktree_status="preserved",
+        baseline_sha="a" * 40,
+        conflict_files=["shared.txt"],
+    )
+    blocked = Task(
+        id=uuid.uuid4(),
+        objective_id=objective.id,
+        run_id=run.id,
+        position=2,
+        depends_on_positions=[1],
+        title="Dependent task",
+        status="blocked",
+        worktree_status="preserved",
+    )
+    approval = Approval(
+        id=uuid.uuid4(),
+        run_id=run.id,
+        task_id=task.id,
+        kind="task_integration",
+        status="pending",
+        created_at=now,
+        updated_at=now,
+    )
+    resolution = ConflictResolutionAttempt(
+        id=uuid.uuid4(),
+        task_id=task.id,
+        run_id=run.id,
+        agent_id=uuid.uuid4(),
+        status="passed",
+        instructions="",
+        conflict_files=["shared.txt"],
+        test_status="passed",
+        created_at=now,
+        updated_at=now,
+    )
+    session = AsyncMock()
+    session.scalar.side_effect = [approval, resolution]
+    session.get.side_effect = [run, objective, task]
+    session.scalars.return_value = [blocked]
+    count_result = MagicMock()
+    count_result.tuples.return_value = [(run.id, 2)]
+    session.execute.return_value = count_result
+    client = MagicMock()
+    client.git_integrate_task_worktree = AsyncMock(
+        return_value=WorktreeIntegration(
+            integration_sha="b" * 40,
+            cleaned=True,
+            cleanup_error=None,
+        )
+    )
+
+    async def enabled_settings(_: object) -> dict[str, object]:
+        return {"allow_repository_writes": True}
+
+    async def no_event(*_: object, **__: object) -> None:
+        return None
+
+    send = MagicMock()
+    monkeypatch.setattr(approvals_api, "get_workflow_settings", enabled_settings)
+    monkeypatch.setattr(approvals_api, "append_run_event", no_event)
+    monkeypatch.setattr(approvals_api, "ProviderGatewayClient", lambda: client)
+    monkeypatch.setattr(
+        "mission_control.workers.actors.executor.execute_run.send", send
+    )
+
+    response = asyncio.run(
+        approvals_api.decide_approval(
+            approval.id,
+            approvals_api.ApprovalDecision(decision="approve"),
+            "admin",
+            session,
+        )
+    )
+
+    assert response.status == "approved"
+    assert task.status == "completed"
+    assert task.conflict_files == []
+    assert blocked.status == "planned"
+    assert blocked.worktree_status == "active"
+    assert run.status == "queued_for_execution"
+    assert run.worktree_status == "active"
+    assert objective.status == "executing"
+    send.assert_called_once_with(str(run.id))
 
 
 def test_stale_execution_resume_requeues_only_the_interrupted_task(
@@ -675,10 +859,13 @@ def test_failed_task_with_checkpoint_can_be_reverted(
         id=uuid.uuid4(),
         objective_id=objective_id,
         run_id=run.id,
+        position=1,
+        depends_on_positions=[],
         title="Broken step",
         status="failed",
         agent_role="developer",
         checkpoint_sha="a" * 40,
+        conflict_files=[],
     )
     repository = Repository(id=run.repository_id, name="demo", path="/repos/demo")
     session = AsyncMock()
@@ -698,6 +885,133 @@ def test_failed_task_with_checkpoint_can_be_reverted(
     assert task.status == "reverted"
     assert response.status == "reverted"
     client.git_revert.assert_awaited_once_with("/workspaces/demo", "a" * 40)
+
+
+def test_preserved_task_conflict_returns_branch_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = Run(
+        id=uuid.uuid4(),
+        objective_id=uuid.uuid4(),
+        status="failed",
+        current_step="task_integration_failed",
+        worktree_path="/workspaces/worktrees/run",
+    )
+    task = Task(
+        id=uuid.uuid4(),
+        objective_id=run.objective_id,
+        run_id=run.id,
+        position=1,
+        depends_on_positions=[],
+        title="Conflicting task",
+        status="failed",
+        worktree_path="/workspaces/worktrees/tasks/task",
+        worktree_branch=f"mission-control/task-{uuid.uuid4()}",
+        worktree_status="preserved",
+        baseline_sha="a" * 40,
+        conflict_files=["shared.txt"],
+    )
+    session = AsyncMock()
+    session.get.side_effect = [task, run]
+    resolution_result = MagicMock()
+    resolution_result.first.return_value = None
+    session.execute.return_value = resolution_result
+    client = MagicMock()
+    client.git_task_worktree_report = AsyncMock(
+        return_value=TaskConflictReport(
+            source_head="b" * 40,
+            branch_head="c" * 40,
+            task_changes="M\tshared.txt\n",
+            mission_changes="M\tshared.txt\n",
+            diff="diff --git a/shared.txt b/shared.txt\n",
+        )
+    )
+    monkeypatch.setattr(tasks_api, "ProviderGatewayClient", lambda: client)
+
+    response = asyncio.run(tasks_api.task_conflict(task.id, "admin", session))
+
+    assert response.conflict_files == ["shared.txt"]
+    assert response.branch == task.worktree_branch
+    assert "shared.txt" in response.diff
+
+
+def test_preserved_task_conflict_queues_selected_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    run = Run(
+        id=uuid.uuid4(),
+        objective_id=uuid.uuid4(),
+        status="failed",
+        current_step="task_integration_failed",
+        worktree_path="/workspaces/worktrees/run",
+    )
+    task = Task(
+        id=uuid.uuid4(),
+        objective_id=run.objective_id,
+        run_id=run.id,
+        position=1,
+        depends_on_positions=[],
+        title="Conflicting task",
+        status="failed",
+        worktree_path="/workspaces/worktrees/tasks/task",
+        worktree_branch=f"mission-control/task-{uuid.uuid4()}",
+        worktree_status="preserved",
+        baseline_sha="a" * 40,
+        conflict_files=["shared.txt"],
+    )
+    agent = Agent(
+        id=uuid.uuid4(),
+        name="Conflict reviewer",
+        role="reviewer",
+        provider="codex",
+        enabled=True,
+    )
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.scalar.side_effect = [task, None]
+    session.get.side_effect = [run, agent]
+
+    async def refresh_attempt(attempt: ConflictResolutionAttempt) -> None:
+        attempt.id = uuid.uuid4()
+        attempt.created_at = now
+        attempt.updated_at = now
+
+    session.refresh.side_effect = refresh_attempt
+
+    async def enabled_settings(_: object) -> dict[str, object]:
+        return {"allow_repository_writes": True}
+
+    async def no_event(*_: object, **__: object) -> None:
+        return None
+
+    send = MagicMock()
+    monkeypatch.setattr(tasks_api, "get_workflow_settings", enabled_settings)
+    monkeypatch.setattr(tasks_api, "append_run_event", no_event)
+    monkeypatch.setattr(
+        "mission_control.workers.actors.executor.resolve_task_conflict_attempt.send",
+        send,
+    )
+
+    response = asyncio.run(
+        tasks_api.resolve_task_conflict(
+            task.id,
+            tasks_api.ConflictResolutionRequest(
+                agent_id=agent.id,
+                instructions="Preserve both validation paths.",
+            ),
+            "admin",
+            session,
+        )
+    )
+
+    assert response.status == "queued"
+    assert response.agent_id == agent.id
+    assert response.instructions == "Preserve both validation paths."
+    queued = session.add.call_args.args[0]
+    assert isinstance(queued, ConflictResolutionAttempt)
+    assert queued.conflict_files == ["shared.txt"]
+    send.assert_called_once_with(str(queued.id))
 
 
 def test_only_completed_or_failed_tasks_can_be_reverted() -> None:
@@ -721,6 +1035,12 @@ def test_execution_actor_is_scoped_to_one_long_provider_task() -> None:
     assert execute_run.options["max_retries"] == 3
     assert execute_run.options["time_limit"] == TASK_ACTOR_TIME_LIMIT_MS
     assert TASK_ACTOR_TIME_LIMIT_MS > 2 * 30 * 60 * 1000
+
+
+def test_verification_actor_has_an_independent_time_budget() -> None:
+    assert verify_run.options["max_retries"] == 2
+    assert verify_run.options["time_limit"] == VERIFICATION_ACTOR_TIME_LIMIT_MS
+    assert VERIFICATION_ACTOR_TIME_LIMIT_MS >= 45 * 60 * 1000
 
 
 def test_planner_prompt_includes_persistent_instructions() -> None:
@@ -826,8 +1146,211 @@ def test_planner_extracts_tasks_from_nested_provider_event() -> None:
             "title": "Build endpoint",
             "description": "Add the API route.",
             "agent_role": "developer",
+            "depends_on": [],
+            "predicted_files": [],
         }
     ]
+
+
+def test_planner_extracts_acceptance_criteria_with_tasks() -> None:
+    tasks, criteria = _extract_plan(
+        '{"acceptance_criteria":["The endpoint returns 201 for valid input"],'
+        '"tasks":[{"title":"Build endpoint","agent_role":"developer"}]}'
+    )
+
+    assert tasks[0]["title"] == "Build endpoint"
+    assert criteria == ["The endpoint returns 201 for valid input"]
+
+
+def test_planner_extracts_explicit_parallel_dependencies() -> None:
+    tasks = _extract_tasks(
+        '{"tasks":['
+        '{"title":"Backend","depends_on":[]},'
+        '{"title":"Frontend","depends_on":[]},'
+        '{"title":"Integration","depends_on":[1,2]}'
+        "]}"
+    )
+
+    assert [task["depends_on"] for task in tasks] == [[], [], [1, 2]]
+
+
+def test_ready_tasks_require_every_completed_dependency() -> None:
+    first = Task(
+        objective_id=uuid.uuid4(),
+        position=1,
+        depends_on_positions=[],
+        title="Backend",
+        status="completed",
+    )
+    second = Task(
+        objective_id=first.objective_id,
+        position=2,
+        depends_on_positions=[],
+        title="Frontend",
+        status="queued",
+    )
+    integration = Task(
+        objective_id=first.objective_id,
+        position=3,
+        depends_on_positions=[1, 2],
+        title="Integration",
+        status="queued",
+    )
+
+    assert _ready_tasks([first, second, integration]) == [second]
+    second.status = "completed"
+    assert _ready_tasks([first, second, integration]) == [integration]
+
+
+def test_planner_extracts_predicted_files() -> None:
+    tasks = _extract_tasks(
+        '{"tasks":[{"title":"Auth","predicted_files":["src/auth.py"," ",42],'
+        '"depends_on":[]}]}'
+    )
+
+    assert tasks[0]["predicted_files"] == ["src/auth.py"]
+
+
+def test_overlapping_predicted_files_serialize_execution() -> None:
+    running = Task(
+        objective_id=uuid.uuid4(),
+        position=1,
+        depends_on_positions=[],
+        predicted_files=["src/api/**"],
+        title="API",
+        status="in_progress",
+    )
+    colliding = Task(
+        objective_id=running.objective_id,
+        position=2,
+        depends_on_positions=[],
+        predicted_files=["src/api/users.py"],
+        title="Users",
+        status="queued",
+    )
+    disjoint = Task(
+        objective_id=running.objective_id,
+        position=3,
+        depends_on_positions=[],
+        predicted_files=["apps/web/page.tsx"],
+        title="Web",
+        status="queued",
+    )
+
+    assert _tasks_touch_shared_files(running, colliding) is True
+    assert _tasks_touch_shared_files(running, disjoint) is False
+    # The colliding task is deferred; the disjoint task stays claimable.
+    assert _claimable_tasks([colliding, disjoint], [running]) == [disjoint]
+
+
+def test_unknown_predicted_files_keep_parallel_behavior() -> None:
+    running = Task(
+        objective_id=uuid.uuid4(),
+        position=1,
+        depends_on_positions=[],
+        predicted_files=[],
+        title="Legacy running",
+        status="in_progress",
+    )
+    ready = Task(
+        objective_id=running.objective_id,
+        position=2,
+        depends_on_positions=[],
+        predicted_files=["src/api/users.py"],
+        title="Ready",
+        status="queued",
+    )
+
+    # Without evidence of overlap we do not regress Phase 5 parallelism.
+    assert _tasks_touch_shared_files(running, ready) is False
+    assert _claimable_tasks([ready], [running]) == [ready]
+
+
+def test_verification_parser_requires_specific_evidence() -> None:
+    criterion_id = str(uuid.uuid4())
+
+    parsed = _extract_verification(
+        json.dumps(
+            {
+                "criteria": [
+                    {
+                        "criterion_id": criterion_id,
+                        "status": "passed",
+                        "evidence": "tests/test_api.py::test_create passed",
+                    }
+                ],
+                "summary": "All checks passed.",
+            }
+        )
+    )
+
+    assert parsed == (
+        {criterion_id: ("passed", "tests/test_api.py::test_create passed")},
+        "All checks passed.",
+    )
+
+
+def test_verification_prompt_includes_deterministic_test_evidence() -> None:
+    project = Project(name="Storefront", memory="")
+    objective = Objective(project_id=project.id, title="Ship search", description=None)
+    reviewer = Agent(
+        name="Independent reviewer",
+        role="reviewer",
+        provider="codex",
+        instructions="Require concrete evidence.",
+    )
+    criterion = VerificationCriterion(
+        id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        position=1,
+        description="Search returns matching products.",
+        status="pending",
+    )
+    evidence = VerificationEvidence(
+        run_id=criterion.run_id,
+        kind="test",
+        status="failed",
+        command="npm test",
+        exit_code=1,
+        output_excerpt="search test failed",
+        error=None,
+    )
+
+    prompt = _verification_prompt(
+        objective=objective,
+        project=project,
+        reviewer=reviewer,
+        criteria=[criterion],
+        completed_tasks=["Implement search"],
+        test_evidence=evidence,
+    )
+
+    assert "DETERMINISTIC TEST EVIDENCE" in prompt
+    assert "Status: failed" in prompt
+    assert "Command: npm test" in prompt
+    assert "search test failed" in prompt
+
+
+@pytest.mark.parametrize(
+    ("status", "allowed"),
+    [
+        ("passed", True),
+        ("skipped", True),
+        ("failed", False),
+        ("error", False),
+        ("running", False),
+    ],
+)
+def test_deterministic_gate_only_allows_nonfailing_terminal_results(
+    status: str, allowed: bool
+) -> None:
+    evidence = VerificationEvidence(
+        run_id=uuid.uuid4(),
+        kind="test",
+        status=status,
+    )
+
+    assert _deterministic_gate_passed(evidence) is allowed
 
 
 def test_planner_rejects_empty_task_payload() -> None:

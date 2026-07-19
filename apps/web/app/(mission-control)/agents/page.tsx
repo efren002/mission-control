@@ -819,6 +819,24 @@ function HistoryPanel({
                   Run {item.run_id}
                 </p>
               )}
+              {item.provider && (
+                <p className="mt-1.5 font-mono text-[9px] text-dim">
+                  Route: {item.provider}
+                  {item.model ? ` / ${item.model}` : " / provider default"} · attempt{" "}
+                  {item.attempt}
+                  {item.fallback_from_provider
+                    ? ` · fallback from ${item.fallback_from_provider}`
+                    : ""}
+                </p>
+              )}
+              {item.total_tokens != null && (
+                <p className="mt-1 font-mono text-[9px] text-dim">
+                  Usage: {item.total_tokens.toLocaleString()} tokens · input{" "}
+                  {(item.input_tokens ?? 0).toLocaleString()} · cached{" "}
+                  {(item.cached_input_tokens ?? 0).toLocaleString()} · output{" "}
+                  {(item.output_tokens ?? 0).toLocaleString()}
+                </p>
+              )}
               {item.input_excerpt && (
                 <HistoryDetails label="Input sent" value={item.input_excerpt} />
               )}

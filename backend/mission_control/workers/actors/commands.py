@@ -10,7 +10,7 @@ import dramatiq
 from mission_control.infrastructure.database.models import CommandRun, Repository
 from mission_control.infrastructure.database.session import async_session_factory
 from mission_control.infrastructure.providers.gateway_client import (
-    ProviderGatewayClient,
+    RuntimeGatewayClient,
     provider_workspace,
 )
 from mission_control.infrastructure.queue.broker import broker as broker
@@ -62,11 +62,12 @@ async def _run_tests(command_run_id: uuid.UUID) -> None:
     error: str | None = None
     try:
         workspace = provider_workspace(repository_path)
-        result = await ProviderGatewayClient().run_command(
+        result = await RuntimeGatewayClient().run_command(
             workspace,
             command,
             timeout_seconds=COMMAND_TIMEOUT_SECONDS,
             on_output=stream_output,
+            sandbox_id=str(command_run_id),
         )
     except Exception as failure:
         error = str(failure)[:4000]

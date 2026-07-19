@@ -49,6 +49,11 @@ def _send(job: DispatchJob) -> None:
 
         run_project_tests.send(entity_id)
         return
+    if job.kind == "run_maintenance_detector":
+        from mission_control.workers.actors.maintenance import run_maintenance_detector
+
+        run_maintenance_detector.send(entity_id)
+        return
     raise ValueError(f"Unsupported dispatch job kind: {job.kind}")
 
 

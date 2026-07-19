@@ -26,6 +26,7 @@ describe("Sidebar", () => {
     ).toEqual([
       "Dashboard",
       "Missions",
+      "Operations",
       "Projects",
       "Repositories",
       "Agents",

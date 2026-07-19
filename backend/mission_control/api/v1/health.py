@@ -8,7 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from mission_control.core.config import get_settings
 from mission_control.infrastructure.database.session import get_session
-from mission_control.infrastructure.providers.gateway_client import ProviderGatewayClient
+from mission_control.infrastructure.providers.gateway_client import (
+    ProviderGatewayClient,
+    RuntimeGatewayClient,
+)
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -49,6 +52,14 @@ async def health(session: Annotated[AsyncSession, Depends(get_session)]) -> Heal
     gateway = await ProviderGatewayClient().health()
     components["provider_gateway"] = ComponentHealth(
         status="operational" if gateway.get("status") == "operational" else "unavailable"
+    )
+    runtime_gateway = await RuntimeGatewayClient().health()
+    components["runtime_gateway"] = ComponentHealth(
+        status=(
+            "operational"
+            if runtime_gateway.get("status") == "operational"
+            else "unavailable"
+        )
     )
 
     overall = (

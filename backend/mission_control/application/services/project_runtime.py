@@ -16,6 +16,7 @@ from mission_control.application.services.runtime_detection import (
 from mission_control.infrastructure.database.models import CommandRun, Project, Repository
 from mission_control.infrastructure.providers.gateway_client import (
     ProviderGatewayClient,
+    RuntimeGatewayClient,
     provider_workspace,
 )
 
@@ -39,7 +40,7 @@ class ProjectRuntimeService:
         gateway: ProviderGatewayClient | None = None,
     ) -> None:
         self.session = session
-        self.gateway = gateway or ProviderGatewayClient()
+        self.gateway = gateway or RuntimeGatewayClient()
 
     async def snapshot(
         self,

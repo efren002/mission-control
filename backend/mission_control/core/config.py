@@ -19,10 +19,14 @@ class Settings(BaseSettings):
     repository_host_root: str | None = None
     mission_control_host_root: str | None = None
     provider_repository_root: str = "/workspaces/repositories"
+    worktree_root: str = "/runtime/worktrees"
+    provider_worktree_root: str = "/workspaces/worktrees"
     attachment_root: str = "/attachments"
     provider_attachment_root: str = "/workspaces/attachments"
     provider_gateway_url: str = "http://localhost:8100"
     provider_gateway_token: str = "replace-with-a-separate-long-random-token"
+    runtime_gateway_url: str = "http://localhost:8110"
+    runtime_gateway_token: str = "replace-with-a-runtime-gateway-token"
     local_admin_token: str = "replace-with-a-long-random-token"
     auto_admin_login: bool = True
     api_cors_origins: list[str] = Field(

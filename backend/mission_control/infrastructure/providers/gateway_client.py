@@ -16,6 +16,12 @@ OnOutput = Callable[[str], Awaitable[None]]
 class ProviderExecutionError(RuntimeError):
     """Raised when the provider process or gateway response is unsuccessful."""
 
+    def __init__(
+        self, detail: str, *, result: ProviderResult | None = None
+    ) -> None:
+        super().__init__(detail)
+        self.result = result
+
 
 class GatewayRequestError(ProviderExecutionError):
     """Raised when the gateway rejects a request, keeping its HTTP status."""
@@ -23,6 +29,14 @@ class GatewayRequestError(ProviderExecutionError):
     def __init__(self, detail: str, status_code: int) -> None:
         super().__init__(detail)
         self.status_code = status_code
+
+
+class TaskIntegrationConflict(ProviderExecutionError):
+    """Raised when a task branch cannot merge cleanly into its mission."""
+
+    def __init__(self, detail: str, conflict_files: list[str]) -> None:
+        super().__init__(detail)
+        self.conflict_files = conflict_files
 
 
 def provider_workspace(repository_path: str, settings: Settings | None = None) -> str:
@@ -37,6 +51,20 @@ def provider_workspace(repository_path: str, settings: Settings | None = None) -
     return str(Path(resolved_settings.provider_repository_root) / relative)
 
 
+def local_worktree_path(
+    provider_path: str, settings: Settings | None = None
+) -> Path:
+    """Map a gateway worktree path to the API/worker runtime-volume mount."""
+    resolved_settings = settings or get_settings()
+    worktree = Path(provider_path)
+    provider_root = Path(resolved_settings.provider_worktree_root)
+    try:
+        relative = worktree.relative_to(provider_root)
+    except ValueError as error:
+        raise ValueError("Worktree is outside the configured provider worktree root") from error
+    return Path(resolved_settings.worktree_root) / relative
+
+
 @dataclass(frozen=True)
 class ProviderExecution:
     stdout: str
@@ -44,6 +72,52 @@ class ProviderExecution:
     exit_code: int | None
     timed_out: bool
     duration_ms: int | None
+
+
+@dataclass(frozen=True)
+class ProviderResult:
+    output: str
+    duration_ms: int | None
+    input_tokens: int | None
+    cached_input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+
+
+@dataclass(frozen=True)
+class WorktreeResult:
+    worktree: str
+    branch: str
+    baseline_sha: str
+    recovered: bool
+
+
+@dataclass(frozen=True)
+class WorktreeIntegration:
+    integration_sha: str
+    cleaned: bool
+    cleanup_error: str | None
+
+
+@dataclass(frozen=True)
+class TaskConflictReport:
+    source_head: str
+    branch_head: str
+    task_changes: str
+    mission_changes: str
+    diff: str
+
+
+@dataclass(frozen=True)
+class TaskResolutionPreparation:
+    source_head: str
+    branch_head: str
+    conflict_files: list[str]
+    recovered: bool
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and value >= 0 else None
 
 
 def parse_gateway_events(body: str) -> ProviderExecution:
@@ -93,13 +167,21 @@ def parse_gateway_events(body: str) -> ProviderExecution:
 
 
 class ProviderGatewayClient:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        base_url: str | None = None,
+        token: str | None = None,
+    ) -> None:
         self.settings = settings or get_settings()
+        self.base_url = base_url or self.settings.provider_gateway_url
+        self.token = token or self.settings.provider_gateway_token
 
     async def health(self) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
-                response = await client.get(f"{self.settings.provider_gateway_url}/health")
+                response = await client.get(f"{self.base_url}/health")
                 response.raise_for_status()
                 payload = response.json()
                 if not isinstance(payload, dict):
@@ -109,15 +191,27 @@ class ProviderGatewayClient:
             return {"status": "unavailable", "detail": str(error)}
 
     async def providers(self) -> dict[str, Any]:
-        headers = {"Authorization": f"Bearer {self.settings.provider_gateway_token}"}
+        headers = {"Authorization": f"Bearer {self.token}"}
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(
-                f"{self.settings.provider_gateway_url}/v1/providers", headers=headers
+                f"{self.base_url}/v1/providers", headers=headers
             )
             response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, dict):
                 raise ValueError("Gateway providers response must be an object")
+            return payload
+
+    async def sandboxes(self) -> dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.token}"}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{self.base_url}/v1/sandboxes", headers=headers
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Gateway sandbox response must be an object")
             return payload
 
     async def login_start(self, provider: str) -> tuple[int, dict[str, Any]]:
@@ -142,11 +236,11 @@ class ProviderGatewayClient:
         Login responses use 400/404/409 to describe session state, so callers
         need the status alongside the payload instead of a raised error.
         """
-        headers = {"Authorization": f"Bearer {self.settings.provider_gateway_token}"}
+        headers = {"Authorization": f"Bearer {self.token}"}
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.request(
                 method,
-                f"{self.settings.provider_gateway_url}{path}",
+                f"{self.base_url}{path}",
                 headers=headers,
                 json=body,
             )
@@ -163,10 +257,10 @@ class ProviderGatewayClient:
 
         Returns the commit SHA, or None when the working tree was clean.
         """
-        headers = {"Authorization": f"Bearer {self.settings.provider_gateway_token}"}
+        headers = {"Authorization": f"Bearer {self.token}"}
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{self.settings.provider_gateway_url}/v1/git/checkpoint",
+                f"{self.base_url}/v1/git/checkpoint",
                 headers=headers,
                 json={"workspace": workspace, "message": message},
             )
@@ -187,10 +281,10 @@ class ProviderGatewayClient:
 
     async def git_revert(self, workspace: str, commit_sha: str) -> str:
         """Revert one checkpoint commit and return the new revert commit SHA."""
-        headers = {"Authorization": f"Bearer {self.settings.provider_gateway_token}"}
+        headers = {"Authorization": f"Bearer {self.token}"}
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{self.settings.provider_gateway_url}/v1/git/revert",
+                f"{self.base_url}/v1/git/revert",
                 headers=headers,
                 json={"workspace": workspace, "commitSha": commit_sha},
             )
@@ -211,12 +305,241 @@ class ProviderGatewayClient:
                 raise ProviderExecutionError("Gateway revert response is missing the commit")
             return revert_sha
 
+    async def git_create_worktree(
+        self, source_workspace: str, run_id: str
+    ) -> WorktreeResult:
+        payload = await self._git_request(
+            "/v1/git/worktrees",
+            {"sourceWorkspace": source_workspace, "runId": run_id},
+        )
+        worktree = payload.get("worktree")
+        branch = payload.get("branch")
+        baseline_sha = payload.get("baselineSha")
+        if (
+            not isinstance(worktree, str)
+            or not worktree
+            or not isinstance(branch, str)
+            or not branch
+            or not isinstance(baseline_sha, str)
+            or not baseline_sha
+        ):
+            raise ProviderExecutionError(
+                "Gateway worktree response is incomplete"
+            )
+        return WorktreeResult(
+            worktree=worktree,
+            branch=branch,
+            baseline_sha=baseline_sha,
+            recovered=payload.get("recovered") is True,
+        )
+
+    async def git_integrate_worktree(
+        self,
+        source_workspace: str,
+        worktree: str,
+        branch: str,
+        baseline_sha: str,
+    ) -> WorktreeIntegration:
+        payload = await self._git_request(
+            "/v1/git/worktrees/integrate",
+            {
+                "sourceWorkspace": source_workspace,
+                "worktree": worktree,
+                "branch": branch,
+                "baselineSha": baseline_sha,
+            },
+        )
+        integration_sha = payload.get("integrationSha")
+        if payload.get("integrated") is not True or not isinstance(
+            integration_sha, str
+        ):
+            raise ProviderExecutionError(
+                "Gateway did not confirm worktree integration"
+            )
+        cleanup_error = payload.get("cleanupError")
+        return WorktreeIntegration(
+            integration_sha=integration_sha,
+            cleaned=payload.get("cleaned") is True,
+            cleanup_error=(
+                cleanup_error if isinstance(cleanup_error, str) else None
+            ),
+        )
+
+    async def git_create_task_worktree(
+        self, source_workspace: str, task_id: str
+    ) -> WorktreeResult:
+        payload = await self._git_request(
+            "/v1/git/task-worktrees",
+            {"sourceWorkspace": source_workspace, "taskId": task_id},
+        )
+        worktree = payload.get("worktree")
+        branch = payload.get("branch")
+        baseline_sha = payload.get("baselineSha")
+        if (
+            not isinstance(worktree, str)
+            or not worktree
+            or not isinstance(branch, str)
+            or not branch
+            or not isinstance(baseline_sha, str)
+            or not baseline_sha
+        ):
+            raise ProviderExecutionError("Gateway task worktree response is incomplete")
+        return WorktreeResult(
+            worktree=worktree,
+            branch=branch,
+            baseline_sha=baseline_sha,
+            recovered=payload.get("recovered") is True,
+        )
+
+    async def git_integrate_task_worktree(
+        self,
+        source_workspace: str,
+        worktree: str,
+        branch: str,
+        baseline_sha: str,
+    ) -> WorktreeIntegration:
+        payload = await self._git_request(
+            "/v1/git/task-worktrees/integrate",
+            {
+                "sourceWorkspace": source_workspace,
+                "worktree": worktree,
+                "branch": branch,
+                "baselineSha": baseline_sha,
+            },
+        )
+        integration_sha = payload.get("integrationSha")
+        if payload.get("integrated") is not True or not isinstance(
+            integration_sha, str
+        ):
+            raise ProviderExecutionError(
+                "Gateway did not confirm task worktree integration"
+            )
+        cleanup_error = payload.get("cleanupError")
+        return WorktreeIntegration(
+            integration_sha=integration_sha,
+            cleaned=payload.get("cleaned") is True,
+            cleanup_error=cleanup_error if isinstance(cleanup_error, str) else None,
+        )
+
+    async def git_task_worktree_report(
+        self,
+        source_workspace: str,
+        worktree: str,
+        branch: str,
+        baseline_sha: str,
+    ) -> TaskConflictReport:
+        payload = await self._git_request(
+            "/v1/git/task-worktrees/report",
+            {
+                "sourceWorkspace": source_workspace,
+                "worktree": worktree,
+                "branch": branch,
+                "baselineSha": baseline_sha,
+            },
+        )
+        values = {
+            key: payload.get(key)
+            for key in (
+                "sourceHead",
+                "branchHead",
+                "taskChanges",
+                "missionChanges",
+                "diff",
+            )
+        }
+        if not all(isinstance(value, str) for value in values.values()):
+            raise ProviderExecutionError("Gateway conflict report is incomplete")
+        return TaskConflictReport(
+            source_head=str(values["sourceHead"]),
+            branch_head=str(values["branchHead"]),
+            task_changes=str(values["taskChanges"]),
+            mission_changes=str(values["missionChanges"]),
+            diff=str(values["diff"]),
+        )
+
+    async def git_prepare_task_resolution(
+        self,
+        source_workspace: str,
+        worktree: str,
+        branch: str,
+        baseline_sha: str,
+    ) -> TaskResolutionPreparation:
+        payload = await self._git_request(
+            "/v1/git/task-worktrees/resolve",
+            {
+                "sourceWorkspace": source_workspace,
+                "worktree": worktree,
+                "branch": branch,
+                "baselineSha": baseline_sha,
+            },
+        )
+        source_head = payload.get("sourceHead")
+        branch_head = payload.get("branchHead")
+        conflict_files = payload.get("conflictFiles")
+        if (
+            payload.get("prepared") is not True
+            or not isinstance(source_head, str)
+            or not isinstance(branch_head, str)
+            or not isinstance(conflict_files, list)
+            or not all(isinstance(item, str) for item in conflict_files)
+        ):
+            raise ProviderExecutionError("Gateway resolution response is incomplete")
+        return TaskResolutionPreparation(
+            source_head=source_head,
+            branch_head=branch_head,
+            conflict_files=conflict_files,
+            recovered=payload.get("recovered") is True,
+        )
+
+    async def _git_request(
+        self, path: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.token}"}
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{self.base_url}{path}",
+                headers=headers,
+                json=body,
+            )
+            if response.status_code != 200:
+                detail: object = None
+                conflict_files: object = None
+                try:
+                    error_payload = response.json()
+                    detail = error_payload.get("detail")
+                    conflict_files = error_payload.get("conflictFiles")
+                except ValueError:
+                    detail = None
+                if isinstance(conflict_files, list):
+                    normalized_files = [
+                        item for item in conflict_files if isinstance(item, str)
+                    ]
+                    if normalized_files:
+                        raise TaskIntegrationConflict(
+                            detail
+                            if isinstance(detail, str)
+                            else "Task changes conflict with the mission workspace",
+                            normalized_files,
+                        )
+                raise ProviderExecutionError(
+                    detail
+                    if isinstance(detail, str)
+                    else f"Git operation failed with status {response.status_code}"
+                )
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ProviderExecutionError(
+                    "Gateway Git response must be an object"
+                )
+            return payload
+
     async def run_command(
         self,
         workspace: str,
         command: str,
         timeout_seconds: int = 900,
         on_output: OnOutput | None = None,
+        sandbox_id: str | None = None,
     ) -> ProviderExecution:
         """Run a project command through the gateway, streaming the SSE response.
 
@@ -224,7 +547,7 @@ class ProviderGatewayClient:
         failing command means. When on_output is provided it receives the
         rolling tail of combined stdout and stderr while the command runs.
         """
-        headers = {"Authorization": f"Bearer {self.settings.provider_gateway_token}"}
+        headers = {"Authorization": f"Bearer {self.token}"}
         stdout: list[str] = []
         stderr: list[str] = []
         completed: dict[str, Any] | None = None
@@ -234,12 +557,13 @@ class ProviderGatewayClient:
         async with httpx.AsyncClient(timeout=float(timeout_seconds + 10)) as client:
             async with client.stream(
                 "POST",
-                f"{self.settings.provider_gateway_url}/v1/commands/stream",
+                f"{self.base_url}/v1/commands/stream",
                 headers=headers,
                 json={
                     "workspace": workspace,
                     "command": command,
                     "timeoutMs": timeout_seconds * 1000,
+                    "sandboxId": sandbox_id,
                 },
             ) as response:
                 if response.status_code != 200:
@@ -321,11 +645,11 @@ class ProviderGatewayClient:
     async def _app_request(
         self, method: str, path: str, body: dict[str, Any] | None
     ) -> dict[str, Any]:
-        headers = {"Authorization": f"Bearer {self.settings.provider_gateway_token}"}
+        headers = {"Authorization": f"Bearer {self.token}"}
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.request(
                 method,
-                f"{self.settings.provider_gateway_url}{path}",
+                f"{self.base_url}{path}",
                 headers=headers,
                 json=body,
             )
@@ -356,13 +680,39 @@ class ProviderGatewayClient:
         access_mode: str = "read-only",
         usage_label: str | None = None,
         on_output: OnOutput | None = None,
+        sandbox_id: str | None = None,
     ) -> str:
+        result = await self.execute_result(
+            provider,
+            prompt,
+            workspace=workspace,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            access_mode=access_mode,
+            usage_label=usage_label,
+            on_output=on_output,
+            sandbox_id=sandbox_id,
+        )
+        return result.output
+
+    async def execute_result(
+        self,
+        provider: str,
+        prompt: str,
+        workspace: str = "/workspaces",
+        model: str | None = None,
+        timeout_seconds: int = 1800,
+        access_mode: str = "read-only",
+        usage_label: str | None = None,
+        on_output: OnOutput | None = None,
+        sandbox_id: str | None = None,
+    ) -> ProviderResult:
         """Run a provider through the gateway, streaming the SSE response.
 
         When on_output is provided it receives the rolling tail of provider
         stdout while the process runs, so callers can surface live progress.
         """
-        headers = {"Authorization": f"Bearer {self.settings.provider_gateway_token}"}
+        headers = {"Authorization": f"Bearer {self.token}"}
         stdout: list[str] = []
         stderr: list[str] = []
         completed: dict[str, Any] | None = None
@@ -372,7 +722,7 @@ class ProviderGatewayClient:
         async with httpx.AsyncClient(timeout=float(timeout_seconds + 10)) as client:
             async with client.stream(
                 "POST",
-                f"{self.settings.provider_gateway_url}/v1/execute",
+                f"{self.base_url}/v1/execute",
                 headers=headers,
                 json={
                     "provider": provider,
@@ -382,6 +732,7 @@ class ProviderGatewayClient:
                     "timeoutMs": timeout_seconds * 1000,
                     "accessMode": access_mode,
                     "usageLabel": usage_label,
+                    "sandboxId": sandbox_id,
                 },
             ) as response:
                 response.raise_for_status()
@@ -424,8 +775,19 @@ class ProviderGatewayClient:
 
         if completed is None:
             raise ProviderExecutionError("Gateway response ended without a completion event")
+        output = "".join(stdout)
+        raw_usage = completed.get("usage")
+        usage = raw_usage if isinstance(raw_usage, dict) else {}
+        result = ProviderResult(
+            output=output,
+            duration_ms=_optional_int(completed.get("durationMs")),
+            input_tokens=_optional_int(usage.get("inputTokens")),
+            cached_input_tokens=_optional_int(usage.get("cachedInputTokens")),
+            output_tokens=_optional_int(usage.get("outputTokens")),
+            total_tokens=_optional_int(usage.get("totalTokens")),
+        )
         if completed.get("timedOut") is True:
-            raise ProviderExecutionError("Provider execution timed out")
+            raise ProviderExecutionError("Provider execution timed out", result=result)
         exit_code = completed.get("exitCode")
         if exit_code != 0:
             # Claude reports failures (max turns, refusals) in the final JSON
@@ -433,6 +795,19 @@ class ProviderGatewayClient:
             # stdout tail to keep the persisted error actionable.
             detail = "".join(stderr).strip()[-2000:] or "".join(stdout).strip()[-2000:]
             raise ProviderExecutionError(
-                f"Provider exited with code {exit_code}" + (f": {detail}" if detail else "")
+                f"Provider exited with code {exit_code}" + (f": {detail}" if detail else ""),
+                result=result,
             )
-        return "".join(stdout)
+        return result
+
+
+class RuntimeGatewayClient(ProviderGatewayClient):
+    """Credential-free gateway used only for trusted project commands and previews."""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        resolved_settings = settings or get_settings()
+        super().__init__(
+            resolved_settings,
+            base_url=resolved_settings.runtime_gateway_url,
+            token=resolved_settings.runtime_gateway_token,
+        )

@@ -9,6 +9,7 @@ import { useAdminToken } from "@/features/auth/use-admin-token";
 import {
   catalogApi,
   type Objective,
+  type Agent,
   type Project,
   type Repository,
   type RunDetail,
@@ -455,7 +456,14 @@ function stepProgressOf(
     case "completed":
       return { current: 3, failed: false };
     case "failed":
-      return { current: detail?.current_step === "execution_failed" ? 2 : 0, failed: true };
+      return {
+        current:
+          detail?.current_step?.startsWith("execution") ||
+          detail?.current_step?.startsWith("verification")
+            ? 2
+            : 0,
+        failed: true,
+      };
     default:
       return { current: 0, failed: false };
   }
@@ -540,9 +548,11 @@ export function MissionDetail({
   useEffect(() => setEditing(false), [objective.id]);
 
   const stage = stageOf(objective.status);
-  const canEdit = ["draft", "failed", "rejected"].includes(objective.status);
-  const runFinished = detail?.status === "completed" || detail?.status === "failed";
   const pendingApproval = detail?.approvals.find((item) => item.status === "pending") ?? null;
+  const canEdit =
+    ["draft", "failed", "rejected"].includes(objective.status) &&
+    pendingApproval?.kind !== "task_integration";
+  const runFinished = detail?.status === "completed" || detail?.status === "failed";
   const readyToBuild =
     detail?.status === "completed" && detail.current_step === "planned";
   const building =
@@ -556,8 +566,12 @@ export function MissionDetail({
     detail?.status === "executing" &&
     lastActivity !== null &&
     Date.now() - lastActivity.at > STALLED_EXECUTION_MS;
-  const built = detail?.status === "completed" && detail.current_step === "executed";
-  const canPlan = ["draft", "failed", "rejected"].includes(objective.status);
+  const built =
+    detail?.status === "completed" &&
+    ["executed", "verified"].includes(detail.current_step ?? "");
+  const canPlan =
+    ["draft", "failed", "rejected"].includes(objective.status) &&
+    pendingApproval?.kind !== "task_integration";
   const lastError =
     [...(detail?.invocations ?? [])].reverse().find((item) => item.error)?.error ?? null;
   const selectedRepository =
@@ -758,12 +772,21 @@ export function MissionDetail({
           <p className="text-[10px] font-bold uppercase tracking-wider text-signal">
             {pendingApproval.kind === "plan"
               ? "Review the proposed plan"
-              : "Approve repository changes"}
+              : pendingApproval.kind === "task_integration"
+                ? "Review task merge conflict"
+                : "Approve repository changes"}
           </p>
           {pendingApproval.kind === "execution" && (
             <p className="mt-2 text-[10px] leading-4 text-orange-200">
               Approving allows the assigned agents to edit the project repository and run
               project commands.
+            </p>
+          )}
+          {pendingApproval.kind === "task_integration" && (
+            <p className="mt-2 text-[10px] leading-4 text-orange-200">
+              The task branch was preserved because Git could not merge it safely. Inspect the
+              conflicting files below and run assisted resolution. Retry is allowed only after
+              its verification passes; approval never chooses conflict content automatically.
             </p>
           )}
           <textarea
@@ -779,7 +802,7 @@ export function MissionDetail({
               onClick={() => void decide("approve")}
               className="bg-signal px-4 py-2 text-[10px] font-bold uppercase text-black disabled:opacity-40"
             >
-              Approve
+              {pendingApproval.kind === "task_integration" ? "Retry merge" : "Approve"}
             </button>
             <button
               disabled={actionBusy}
@@ -839,8 +862,17 @@ export function MissionDetail({
             <Loader2 className="h-3.5 w-3.5 animate-spin" /> Building
           </p>
           <p className="mt-2 text-[10px] text-dim">
-            {detail.current_step ? `Current step: ${detail.current_step}` : "Starting up."}
+            {detail.current_step?.startsWith("verification")
+              ? "Implementation finished. An independent reviewer is checking the acceptance criteria."
+              : detail.current_step
+                ? `Current step: ${detail.current_step}`
+                : "Starting up."}
           </p>
+          {detail.worktree_branch && (
+            <p className="mt-1 break-all text-[10px] text-dim">
+              Isolated branch: {detail.worktree_branch}
+            </p>
+          )}
           {lastActivity && (
             <p className="mt-1 text-[10px] text-dim">
               Last activity: {lastActivity.label}, {relativeTime(lastActivity.at)}
@@ -893,6 +925,16 @@ export function MissionDetail({
             Each completed task was saved as a Git checkpoint commit, so you can review every
             step below or roll back with normal Git tools.
           </p>
+          {detail?.integration_sha && (
+            <p className="mt-2 break-all text-[10px] text-phosphor">
+              Verified branch integrated at {detail.integration_sha.slice(0, 12)}.
+            </p>
+          )}
+          {detail?.worktree_status === "cleanup_pending" && (
+            <p className="mt-2 text-[10px] text-orange-300">
+              Integration succeeded, but automatic worktree cleanup is still pending.
+            </p>
+          )}
         </section>
       )}
 
@@ -911,6 +953,17 @@ export function MissionDetail({
         </p>
       )}
 
+      {detail?.worktree_status === "preserved" && (
+        <p className="mt-3 break-words border border-orange-700/50 bg-orange-900/10 p-4 text-[10px] leading-4 text-orange-200">
+          The failed mission remains isolated on {detail.worktree_branch}. The registered
+          repository was not changed, so the branch can be inspected or recovered safely.
+        </p>
+      )}
+
+      {detail && (detail.verification_criteria?.length ?? 0) > 0 && (
+        <EvidenceReport detail={detail} />
+      )}
+
       {detail && detail.tasks.length > 0 && (
         <section className="mt-7">
           <h3 className="text-[10px] font-bold uppercase tracking-wider text-signal">
@@ -923,6 +976,12 @@ export function MissionDetail({
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="break-words text-xs text-terminal">{task.title}</span>
                   <span className="text-[9px] uppercase text-signal">{task.agent_role}</span>
+                  <span className="text-[9px] uppercase text-dim">
+                    #{task.position}
+                    {task.depends_on_positions.length > 0
+                      ? ` after ${task.depends_on_positions.join(", ")}`
+                      : " independent"}
+                  </span>
                   <span
                     className={`text-[9px] font-bold uppercase ${
                       task.status === "completed"
@@ -940,6 +999,19 @@ export function MissionDetail({
                 <p className="mt-1 break-words text-[10px] leading-4 text-dim">
                   {task.description || "No description"}
                 </p>
+                {task.worktree_status === "preserved" && task.worktree_branch && (
+                  <p className="mt-1 break-all text-[10px] text-orange-300">
+                    Conflicting or failed task branch preserved: {task.worktree_branch}
+                  </p>
+                )}
+                {task.conflict_files.length > 0 && (
+                  <TaskConflictReview token={token} taskId={task.id} />
+                )}
+                {task.worktree_status === "cleanup_pending" && (
+                  <p className="mt-1 text-[10px] text-orange-300">
+                    Task integration succeeded; branch cleanup is pending.
+                  </p>
+                )}
                 {runFinished &&
                   ["completed", "failed"].includes(task.status) &&
                   task.checkpoint_sha && (
@@ -972,6 +1044,118 @@ export function MissionDetail({
   );
 }
 
+function EvidenceReport({ detail }: { detail: RunDetail }) {
+  const criteria = detail.verification_criteria ?? [];
+  const testEvidence = (detail.verification_evidence ?? []).find(
+    (evidence) => evidence.kind === "test",
+  );
+  const passed = criteria.filter(
+    (criterion) => criterion.status === "passed",
+  ).length;
+  const failed = criteria.filter(
+    (criterion) => criterion.status === "failed",
+  ).length;
+  return (
+    <section className="mt-7" aria-label="Acceptance evidence">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-[10px] font-bold uppercase tracking-wider text-signal">
+          Acceptance evidence
+        </h3>
+        <span
+          className={`text-[9px] font-bold uppercase ${
+            failed > 0
+              ? "text-orange-300"
+              : passed === criteria.length
+                ? "text-phosphor"
+                : "text-dim"
+          }`}
+        >
+          {passed}/{criteria.length} verified
+        </span>
+      </div>
+      <p className="mt-2 text-[10px] leading-4 text-dim">
+        The approved plan defines these completion conditions. Mission completion is blocked
+        until an independent reviewer verifies every condition.
+      </p>
+      {testEvidence && (
+        <div className="mt-3 border border-[#292824] bg-white/[0.015] p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-terminal">
+              Project tests
+            </p>
+            <span
+              className={`text-[9px] font-bold uppercase ${
+                testEvidence.status === "passed"
+                  ? "text-phosphor"
+                  : testEvidence.status === "failed" || testEvidence.status === "error"
+                    ? "text-orange-300"
+                    : testEvidence.status === "running"
+                      ? "text-signal"
+                      : "text-dim"
+              }`}
+            >
+              {testEvidence.status}
+              {testEvidence.exit_code !== null ? ` · exit ${testEvidence.exit_code}` : ""}
+            </span>
+          </div>
+          <p className="mt-2 break-all font-mono text-[10px] text-dim">
+            {testEvidence.command || "No configured or detected test command"}
+          </p>
+          {testEvidence.error && (
+            <p className="mt-2 break-words text-[10px] leading-4 text-orange-200">
+              {testEvidence.error}
+            </p>
+          )}
+          {testEvidence.output_excerpt && (
+            <details className="mt-2">
+              <summary className="cursor-pointer text-[9px] font-bold uppercase tracking-wider text-signal">
+                Test output
+              </summary>
+              <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words border border-[#292824] bg-black/30 p-3 text-[10px] leading-4 text-dim">
+                {testEvidence.output_excerpt}
+              </pre>
+            </details>
+          )}
+        </div>
+      )}
+      <ol className="mt-3">
+        {criteria.map((criterion) => (
+          <li key={criterion.id} className="border-t border-[#292824] py-3">
+            <div className="flex items-start gap-3">
+              <span
+                className={`mt-0.5 text-[10px] font-bold ${
+                  criterion.status === "passed"
+                    ? "text-phosphor"
+                    : criterion.status === "failed"
+                      ? "text-orange-300"
+                      : "text-dim"
+                }`}
+                aria-label={criterion.status}
+              >
+                {criterion.status === "passed"
+                  ? "✓"
+                  : criterion.status === "failed"
+                    ? "×"
+                    : "○"}
+              </span>
+              <div className="min-w-0">
+                <p className="break-words text-xs text-terminal">
+                  {criterion.description}
+                </p>
+                {criterion.evidence && (
+                  <p className="mt-1 break-words text-[10px] leading-4 text-dim">
+                    Evidence: {criterion.evidence}
+                  </p>
+                )}
+              </div>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
 function LiveActivity({ invocations }: { invocations: RunInvocation[] }) {
   const running = [...invocations].reverse().find((item) => item.status === "running");
   const output = running?.output_excerpt ?? "";
@@ -993,6 +1177,9 @@ function LiveActivity({ invocations }: { invocations: RunInvocation[] }) {
     <div className="mt-3">
       <p className="text-[9px] uppercase tracking-wider text-dim">
         Live agent activity (raw provider output)
+        {running?.provider
+          ? ` · ${running.provider} · attempt ${running.attempt}`
+          : ""}
       </p>
       <pre
         ref={scrollRef}
@@ -1000,6 +1187,224 @@ function LiveActivity({ invocations }: { invocations: RunInvocation[] }) {
       >
         {output.slice(-3000)}
       </pre>
+    </div>
+  );
+}
+
+function TaskConflictReview({ token, taskId }: { token: string; taskId: string }) {
+  const [open, setOpen] = useState(false);
+  const [report, setReport] = useState<Awaited<
+    ReturnType<typeof catalogApi.taskConflict>
+  > | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentId, setAgentId] = useState("");
+  const [instructions, setInstructions] = useState("");
+  const [starting, setStarting] = useState(false);
+
+  const loadReport = useCallback(async () => {
+    const loaded = await catalogApi.taskConflict(token, taskId);
+    setReport(loaded);
+    return loaded;
+  }, [token, taskId]);
+
+  const toggle = async () => {
+    if (open) return setOpen(false);
+    setOpen(true);
+    if (report || loading) return;
+    setLoading(true);
+    try {
+      const [loadedReport, loadedAgents] = await Promise.all([
+        loadReport(),
+        catalogApi.agents(token),
+      ]);
+      const eligible = loadedAgents.filter(
+        (agent) => agent.enabled && agent.role !== "planner",
+      );
+      setAgents(eligible);
+      setAgentId(
+        loadedReport.latest_resolution?.agent_id ??
+          eligible.find((agent) => agent.role === "reviewer")?.id ??
+          eligible[0]?.id ??
+          "",
+      );
+      setError("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to inspect the conflict");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (
+      !open ||
+      !report?.latest_resolution ||
+      !["queued", "running"].includes(report.latest_resolution.status)
+    ) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void loadReport().catch((cause) => {
+        setError(cause instanceof Error ? cause.message : "Unable to refresh resolution");
+      });
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [loadReport, open, report?.latest_resolution]);
+
+  const startResolution = async () => {
+    if (!agentId) return;
+    setStarting(true);
+    try {
+      const attempt = await catalogApi.resolveTaskConflict(
+        token,
+        taskId,
+        agentId,
+        instructions,
+      );
+      setReport((current) =>
+        current ? { ...current, latest_resolution: attempt } : current,
+      );
+      setError("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to start resolution");
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  return (
+    <div className="mt-2 border-l-2 border-orange-700 pl-3">
+      <button
+        onClick={() => void toggle()}
+        className="text-[9px] font-bold uppercase tracking-wider text-orange-300 hover:underline"
+      >
+        {open ? "Hide conflict report" : "Inspect conflict"}
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2">
+          {loading && <p className="text-[10px] text-dim">Loading conflict report.</p>}
+          {error && <p className="text-[10px] text-orange-300">{error}</p>}
+          {report && (
+            <>
+              <p className="text-[10px] text-orange-200">
+                Conflicting files: {report.conflict_files.join(", ")}
+              </p>
+              <p className="break-all text-[9px] text-dim">
+                Preserved workspace: {report.workspace}
+              </p>
+              <div className="border border-orange-700/40 bg-orange-900/10 p-3">
+                <p className="text-[9px] font-bold uppercase tracking-wider text-orange-200">
+                  Assisted resolution
+                </p>
+                {report.latest_resolution && (
+                  <div className="mt-2 space-y-1 text-[10px] text-dim">
+                    <p>
+                      {report.latest_resolution.agent_name} ·{" "}
+                      <span
+                        className={
+                          report.latest_resolution.status === "passed"
+                            ? "text-phosphor"
+                            : report.latest_resolution.status === "failed"
+                              ? "text-orange-300"
+                              : "text-signal"
+                        }
+                      >
+                        {report.latest_resolution.status}
+                      </span>
+                    </p>
+                    <p>
+                      Verification: {report.latest_resolution.test_status}
+                      {report.latest_resolution.test_command
+                        ? ` · ${report.latest_resolution.test_command}`
+                        : ""}
+                    </p>
+                    {report.latest_resolution.resolution_sha && (
+                      <p>
+                        Resolution checkpoint:{" "}
+                        {report.latest_resolution.resolution_sha.slice(0, 12)}
+                      </p>
+                    )}
+                    {report.latest_resolution.error && (
+                      <p className="text-orange-300">
+                        {report.latest_resolution.error}
+                      </p>
+                    )}
+                    {report.latest_resolution.test_output_excerpt && (
+                      <details>
+                        <summary className="cursor-pointer text-[9px] font-bold uppercase text-signal">
+                          Verification output
+                        </summary>
+                        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words border-l border-[#292824] pl-3 text-[9px]">
+                          {report.latest_resolution.test_output_excerpt}
+                        </pre>
+                      </details>
+                    )}
+                  </div>
+                )}
+                {!["queued", "running", "passed"].includes(
+                  report.latest_resolution?.status ?? "",
+                ) && (
+                  <>
+                    <select
+                      value={agentId}
+                      onChange={(event) => setAgentId(event.target.value)}
+                      className="field mt-3"
+                      aria-label="Conflict resolver"
+                    >
+                      <option value="">Choose a resolver agent</option>
+                      {agents.map((agent) => (
+                        <option key={agent.id} value={agent.id}>
+                          {agent.name} · {agent.role} · {agent.provider}
+                        </option>
+                      ))}
+                    </select>
+                    <textarea
+                      value={instructions}
+                      onChange={(event) => setInstructions(event.target.value)}
+                      rows={2}
+                      maxLength={8000}
+                      placeholder="Optional guidance about the intended resolution"
+                      className="field mt-2"
+                    />
+                    <button
+                      disabled={starting || !agentId}
+                      onClick={() => void startResolution()}
+                      className="mt-2 bg-orange-300 px-3 py-2 text-[9px] font-bold uppercase text-black disabled:opacity-40"
+                    >
+                      {starting ? "Queueing resolver" : "Run assisted resolution"}
+                    </button>
+                  </>
+                )}
+                {report.latest_resolution?.status === "passed" && (
+                  <p className="mt-2 text-[10px] text-phosphor">
+                    Resolution and verification passed. Review the patch, then use Retry merge
+                    in the approval panel.
+                  </p>
+                )}
+              </div>
+              <details>
+                <summary className="cursor-pointer text-[9px] font-bold uppercase text-signal">
+                  Task and mission file changes
+                </summary>
+                <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap border border-[#292824] p-3 text-[10px] text-dim">
+                  {`Task branch:\n${report.task_changes || "(none)"}\nMission branch:\n${report.mission_changes || "(none)"}`}
+                </pre>
+              </details>
+              <details>
+                <summary className="cursor-pointer text-[9px] font-bold uppercase text-signal">
+                  Task patch
+                </summary>
+                <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words border border-[#292824] p-3 text-[10px] text-dim">
+                  {report.diff || "(No patch output)"}
+                  {report.truncated && "\n[Patch truncated.]"}
+                </pre>
+              </details>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,11 +1,20 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { gitCheckpoint, gitRevert } from "../src/git.mjs";
+import {
+  gitCheckpoint,
+  gitCreateTaskWorktree,
+  gitCreateWorktree,
+  gitIntegrateTaskWorktree,
+  gitIntegrateWorktree,
+  gitPrepareTaskResolution,
+  gitRevert,
+  gitTaskWorktreeReport,
+} from "../src/git.mjs";
 
 function initRepository() {
   const workspace = mkdtempSync(join(tmpdir(), "gateway-git-"));
@@ -99,4 +108,219 @@ test("gitRevert refuses a dirty working tree", async () => {
 
 test("gitRevert validates the commit reference", async () => {
   await assert.rejects(gitRevert("/tmp", "HEAD~1"), /not a valid SHA/);
+});
+
+test("worktree lifecycle isolates changes and fast-forwards only after integration", async () => {
+  const { workspace, git } = initRepository();
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "gateway-worktrees-"));
+  const runId = "4198f342-7b3d-4a21-8c11-63c7b229d880";
+  try {
+    const created = await gitCreateWorktree(workspace, runId, worktreeRoot);
+    writeFileSync(join(created.worktree, "isolated.txt"), "mission change\n");
+    const checkpoint = await gitCheckpoint(created.worktree, "Task 1: isolated change");
+
+    assert.equal(existsSync(join(workspace, "isolated.txt")), false);
+    assert.match(checkpoint.commitSha, /^[0-9a-f]{40}$/);
+
+    const integrated = await gitIntegrateWorktree(
+      workspace,
+      created.worktree,
+      created.branch,
+      created.baselineSha,
+    );
+
+    assert.equal(integrated.integrated, true);
+    assert.equal(integrated.cleaned, true);
+    assert.equal(existsSync(join(workspace, "isolated.txt")), true);
+    assert.equal(existsSync(created.worktree), false);
+    assert.equal(git("branch", "--list", created.branch).toString().trim(), "");
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("worktree integration refuses a source repository that moved", async () => {
+  const { workspace } = initRepository();
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "gateway-worktrees-"));
+  const runId = "4198f342-7b3d-4a21-8c11-63c7b229d881";
+  try {
+    const created = await gitCreateWorktree(workspace, runId, worktreeRoot);
+    writeFileSync(join(created.worktree, "isolated.txt"), "mission change\n");
+    await gitCheckpoint(created.worktree, "Task 1: isolated change");
+    writeFileSync(join(workspace, "external.txt"), "external change\n");
+    await gitCheckpoint(workspace, "External source change");
+
+    await assert.rejects(
+      gitIntegrateWorktree(
+        workspace,
+        created.worktree,
+        created.branch,
+        created.baselineSha,
+      ),
+      /Source repository moved from baseline/,
+    );
+    assert.equal(existsSync(created.worktree), true);
+    assert.equal(existsSync(join(workspace, "isolated.txt")), false);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("parallel task worktrees merge non-conflicting changes into the mission", async () => {
+  const { workspace, git } = initRepository();
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "gateway-worktrees-"));
+  try {
+    const first = await gitCreateTaskWorktree(
+      workspace,
+      "5198f342-7b3d-4a21-8c11-63c7b229d880",
+      worktreeRoot,
+    );
+    const second = await gitCreateTaskWorktree(
+      workspace,
+      "6198f342-7b3d-4a21-8c11-63c7b229d880",
+      worktreeRoot,
+    );
+    writeFileSync(join(first.worktree, "first.txt"), "first task\n");
+    writeFileSync(join(second.worktree, "second.txt"), "second task\n");
+    await gitCheckpoint(first.worktree, "First parallel task");
+    await gitCheckpoint(second.worktree, "Second parallel task");
+
+    await gitIntegrateTaskWorktree(
+      workspace,
+      first.worktree,
+      first.branch,
+      first.baselineSha,
+    );
+    await gitIntegrateTaskWorktree(
+      workspace,
+      second.worktree,
+      second.branch,
+      second.baselineSha,
+    );
+
+    assert.equal(existsSync(join(workspace, "first.txt")), true);
+    assert.equal(existsSync(join(workspace, "second.txt")), true);
+    assert.match(git("log", "--format=%s", "-2").toString(), /Merge branch/);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("conflicting task integration aborts without changing the mission", async () => {
+  const { workspace, git } = initRepository();
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "gateway-worktrees-"));
+  try {
+    writeFileSync(join(workspace, "shared.txt"), "baseline\n");
+    await gitCheckpoint(workspace, "Add shared file");
+    const first = await gitCreateTaskWorktree(
+      workspace,
+      "7198f342-7b3d-4a21-8c11-63c7b229d880",
+      worktreeRoot,
+    );
+    const second = await gitCreateTaskWorktree(
+      workspace,
+      "8198f342-7b3d-4a21-8c11-63c7b229d880",
+      worktreeRoot,
+    );
+    writeFileSync(join(first.worktree, "shared.txt"), "first\n");
+    writeFileSync(join(second.worktree, "shared.txt"), "second\n");
+    await gitCheckpoint(first.worktree, "First conflicting task");
+    await gitCheckpoint(second.worktree, "Second conflicting task");
+    await gitIntegrateTaskWorktree(
+      workspace,
+      first.worktree,
+      first.branch,
+      first.baselineSha,
+    );
+    const beforeConflict = git("rev-parse", "HEAD").toString().trim();
+
+    let conflict;
+    try {
+      await gitIntegrateTaskWorktree(
+        workspace,
+        second.worktree,
+        second.branch,
+        second.baselineSha,
+      );
+      assert.fail("Expected task integration to conflict");
+    } catch (error) {
+      conflict = error;
+    }
+    assert.match(conflict.message, /conflict with the mission workspace/);
+    assert.deepEqual(conflict.conflictFiles, ["shared.txt"]);
+
+    assert.equal(git("rev-parse", "HEAD").toString().trim(), beforeConflict);
+    assert.equal(git("status", "--porcelain").toString().trim(), "");
+    assert.equal(existsSync(second.worktree), true);
+    const report = await gitTaskWorktreeReport(
+      workspace,
+      second.worktree,
+      second.branch,
+      second.baselineSha,
+    );
+    assert.match(report.taskChanges, /shared.txt/);
+    assert.match(report.missionChanges, /shared.txt/);
+    assert.match(report.diff, /second/);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("task conflict resolution prepares and recovers the merge in the task worktree", async () => {
+  const { workspace } = initRepository();
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "gateway-worktrees-"));
+  try {
+    writeFileSync(join(workspace, "shared.txt"), "baseline\n");
+    await gitCheckpoint(workspace, "Add shared file");
+    const first = await gitCreateTaskWorktree(
+      workspace,
+      "9198f342-7b3d-4a21-8c11-63c7b229d880",
+      worktreeRoot,
+    );
+    const second = await gitCreateTaskWorktree(
+      workspace,
+      "a198f342-7b3d-4a21-8c11-63c7b229d880",
+      worktreeRoot,
+    );
+    writeFileSync(join(first.worktree, "shared.txt"), "first\n");
+    writeFileSync(join(second.worktree, "shared.txt"), "second\n");
+    await gitCheckpoint(first.worktree, "First conflicting task");
+    await gitCheckpoint(second.worktree, "Second conflicting task");
+    await gitIntegrateTaskWorktree(
+      workspace,
+      first.worktree,
+      first.branch,
+      first.baselineSha,
+    );
+
+    const prepared = await gitPrepareTaskResolution(
+      workspace,
+      second.worktree,
+      second.branch,
+      second.baselineSha,
+    );
+    assert.equal(prepared.prepared, true);
+    assert.equal(prepared.recovered, false);
+    assert.deepEqual(prepared.conflictFiles, ["shared.txt"]);
+    assert.match(
+      readFileSync(join(second.worktree, "shared.txt"), "utf8"),
+      /<<<<<<< HEAD/,
+    );
+
+    const recovered = await gitPrepareTaskResolution(
+      workspace,
+      second.worktree,
+      second.branch,
+      second.baselineSha,
+    );
+    assert.equal(recovered.recovered, true);
+    assert.deepEqual(recovered.conflictFiles, ["shared.txt"]);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });

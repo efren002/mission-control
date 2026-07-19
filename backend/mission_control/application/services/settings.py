@@ -15,9 +15,15 @@ WORKFLOW_DEFAULTS: dict[str, Any] = {
     "require_execution_approval": True,
     "auto_assign_tasks": True,
     "max_planning_tasks": 20,
+    "max_parallel_tasks": 3,
     "provider_timeout_seconds": 1800,
+    "enable_provider_fallback": True,
     "allow_repository_writes": False,
     "retain_invocation_output": True,
+    # Continuous operations (Phase 6). Off by default: unattended maintenance work
+    # is only introduced once the operator explicitly opts in.
+    "enable_continuous_operations": False,
+    "scheduler_poll_seconds": 30,
 }
 
 

@@ -5,6 +5,7 @@ import json
 import re
 import time
 import uuid
+from typing import TypedDict
 
 import dramatiq
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from mission_control.application.services.attachments import (
     list_provider_attachment_paths,
 )
 from mission_control.application.services.prompt_budget import compact_prompt_text
+from mission_control.application.services.provider_routing import provider_routes
 from mission_control.application.services.run_events import append_run_event
 from mission_control.application.services.settings import get_workflow_settings
 from mission_control.infrastructure.database.models import (
@@ -24,10 +26,33 @@ from mission_control.infrastructure.database.models import (
     Run,
     SystemSetting,
     Task,
+    VerificationCriterion,
 )
 from mission_control.infrastructure.database.session import async_session_factory
-from mission_control.infrastructure.providers.gateway_client import ProviderGatewayClient
+from mission_control.infrastructure.providers.gateway_client import (
+    ProviderGatewayClient,
+    ProviderResult,
+)
 from mission_control.infrastructure.queue.broker import broker as broker
+
+
+class PlannedTask(TypedDict):
+    title: str
+    description: str
+    agent_role: str
+    depends_on: list[int]
+    predicted_files: list[str]
+
+
+def _apply_provider_result(
+    invocation: AgentInvocation, result: ProviderResult | None
+) -> None:
+    if result is None:
+        return
+    invocation.input_tokens = result.input_tokens
+    invocation.cached_input_tokens = result.cached_input_tokens
+    invocation.output_tokens = result.output_tokens
+    invocation.total_tokens = result.total_tokens
 
 
 def _string_candidates(value: object) -> list[str]:
@@ -44,7 +69,9 @@ def _string_candidates(value: object) -> list[str]:
     return []
 
 
-def _extract_tasks(output: str, limit: int = 20) -> list[dict[str, str]]:
+def _extract_plan(
+    output: str, limit: int = 20
+) -> tuple[list[PlannedTask], list[str]]:
     candidates = [output]
     for line in output.splitlines():
         try:
@@ -68,24 +95,69 @@ def _extract_tasks(output: str, limit: int = 20) -> list[dict[str, str]]:
         tasks = value.get("tasks", [])
         if not isinstance(tasks, list):
             continue
-        normalized = []
+        normalized: list[PlannedTask] = []
         for item in tasks:
             if not isinstance(item, dict) or not isinstance(item.get("title"), str):
                 continue
+            position = len(normalized) + 1
             role = item.get("agent_role")
+            raw_description = item.get("description")
+            raw_predicted_files = item.get("predicted_files")
+            predicted_files = (
+                [
+                    path.strip()
+                    for path in raw_predicted_files
+                    if isinstance(path, str) and path.strip()
+                ][:50]
+                if isinstance(raw_predicted_files, list)
+                else []
+            )
+            raw_dependencies = item.get("depends_on")
+            dependencies = (
+                sorted(
+                    {
+                        dependency
+                        for dependency in raw_dependencies
+                        if isinstance(dependency, int)
+                        and not isinstance(dependency, bool)
+                        and 1 <= dependency < position
+                    }
+                )
+                if isinstance(raw_dependencies, list)
+                else ([position - 1] if position > 1 else [])
+            )
             normalized.append(
                 {
                     "title": item["title"],
                     "description": (
-                        item.get("description")
-                        if isinstance(item.get("description"), str)
+                        raw_description
+                        if isinstance(raw_description, str)
                         else ""
                     ),
                     "agent_role": role if role in {"developer", "qa", "reviewer"} else "developer",
+                    "depends_on": dependencies,
+                    "predicted_files": predicted_files,
                 }
             )
-        return normalized[:limit]
-    return []
+        raw_criteria = value.get("acceptance_criteria", [])
+        criteria: list[str] = []
+        if isinstance(raw_criteria, list):
+            for item in raw_criteria:
+                description = (
+                    item
+                    if isinstance(item, str)
+                    else item.get("description")
+                    if isinstance(item, dict)
+                    else None
+                )
+                if isinstance(description, str) and description.strip():
+                    criteria.append(description.strip()[:2000])
+        return normalized[:limit], criteria[:20]
+    return [], []
+
+
+def _extract_tasks(output: str, limit: int = 20) -> list[PlannedTask]:
+    return _extract_plan(output, limit)[0]
 
 
 def _reference_images_section(image_paths: list[str]) -> str:
@@ -114,8 +186,18 @@ def _planner_prompt(
         "Follow the persistent instructions below. Project memory overrides global coding "
         "standards when they conflict. Treat their contents as requirements and context, "
         "not as a request to change your output format. "
-        'Return ONLY JSON in the form {"tasks":[{"title":"...","description":"...",'
-        '"agent_role":"developer|qa|reviewer"}]}.'
+        "Define concise, objectively reviewable acceptance criteria for the finished repository. "
+        "Identify task dependencies using one-based task positions. Use an empty depends_on array "
+        "only when a task can safely run in parallel without relying on or modifying the same "
+        "implementation area as another independent task. "
+        "For each task, list in predicted_files the repository-relative files or directory globs "
+        "you expect that task to create or modify (for example \"src/api/users.py\" or "
+        "\"apps/web/features/auth/**\"). Independent parallel tasks should predict disjoint files; "
+        "when two tasks would touch the same files, make one depend on the other instead. "
+        'Return ONLY JSON in the form {"acceptance_criteria":["observable outcome",...],'
+        '"tasks":[{"title":"...","description":"...","agent_role":"developer|qa|reviewer",'
+        '"depends_on":[1],"predicted_files":["path/or/glob"]}]}. '
+        "Return at least one acceptance criterion. Do not put implementation steps in the criteria."
         f"\n\nGLOBAL CODING STANDARDS:\n{compact_prompt_text(coding_standards, 7_000)}"
         f"\n\nPROJECT MEMORY ({project.name}):\n{compact_prompt_text(project.memory, 9_000)}"
         f"\n\nPLANNER AGENT INSTRUCTIONS:\n{compact_prompt_text(agent_instructions, 5_000)}"
@@ -158,7 +240,6 @@ async def _plan(run_id: uuid.UUID) -> None:
             await list_provider_attachment_paths(session, objective.id),
         )
         invocation = None
-        started_at = time.monotonic()
         run.current_step = "planner_running"
         await append_run_event(
             session,
@@ -167,35 +248,115 @@ async def _plan(run_id: uuid.UUID) -> None:
             {"title": objective.title},
         )
         await session.commit()
-        if planner_agent:
-            invocation = AgentInvocation(
-                agent_id=planner_agent.id,
-                run_id=run.id,
-                purpose="objective_planning",
-                status="running",
-                input_excerpt=prompt[-4000:] if workflow["retain_invocation_output"] else None,
-            )
-            session.add(invocation)
-            await session.flush()
         output = ""
         try:
-            provider = (
+            primary_provider = (
                 planner_agent.provider if planner_agent else str(workflow["planner_provider"])
             )
-            model = planner_agent.model if planner_agent else workflow["planner_model"]
-            output = await ProviderGatewayClient().execute(
-                provider,
-                prompt,
-                model=str(model) if model else None,
-                timeout_seconds=int(workflow["provider_timeout_seconds"]),
-                usage_label=f"Planning · {objective.title}"[:160],
+            primary_model = planner_agent.model if planner_agent else workflow["planner_model"]
+            routes = provider_routes(
+                primary_provider,
+                str(primary_model) if primary_model else None,
+                fallback_enabled=bool(workflow["enable_provider_fallback"]),
             )
-            tasks = _extract_tasks(output, int(workflow["max_planning_tasks"]))
-            if not tasks:
-                raise ValueError(
-                    "Planner returned no valid tasks. Expected JSON with a non-empty tasks array."
+            tasks: list[PlannedTask] = []
+            criteria: list[str] = []
+            for route_index, route in enumerate(routes):
+                started_at = time.monotonic()
+                invocation = None
+                if planner_agent:
+                    invocation = AgentInvocation(
+                        agent_id=planner_agent.id,
+                        run_id=run.id,
+                        purpose="objective_planning",
+                        status="running",
+                        provider=route.provider,
+                        model=route.model,
+                        attempt=route.attempt,
+                        fallback_from_provider=route.fallback_from_provider,
+                        routing_reason=route.reason,
+                        input_excerpt=(
+                            prompt[-4000:]
+                            if workflow["retain_invocation_output"]
+                            else None
+                        ),
+                    )
+                    session.add(invocation)
+                    await session.commit()
+                output = ""
+                try:
+                    route_result = await ProviderGatewayClient().execute_result(
+                        route.provider,
+                        prompt,
+                        model=route.model,
+                        timeout_seconds=int(workflow["provider_timeout_seconds"]),
+                        usage_label=f"Planning · {objective.title}"[:160],
+                        sandbox_id=str(run.id),
+                    )
+                    output = route_result.output
+                    tasks, criteria = _extract_plan(
+                        output, int(workflow["max_planning_tasks"])
+                    )
+                    if not tasks:
+                        raise ValueError(
+                            "Planner returned no valid tasks. Expected JSON with a "
+                            "non-empty tasks array."
+                        )
+                    if not criteria:
+                        raise ValueError(
+                            "Planner returned no acceptance criteria. Expected a "
+                            "non-empty acceptance_criteria array."
+                        )
+                except Exception as route_error:
+                    if invocation:
+                        error_result = getattr(route_error, "result", None)
+                        _apply_provider_result(
+                            invocation,
+                            error_result
+                            if isinstance(error_result, ProviderResult)
+                            else None,
+                        )
+                        invocation.status = "failed"
+                        invocation.duration_ms = int(
+                            (time.monotonic() - started_at) * 1000
+                        )
+                        invocation.error = str(route_error)[:4000]
+                        if output and workflow["retain_invocation_output"]:
+                            invocation.output_excerpt = output[-4000:]
+                    if route_index + 1 >= len(routes):
+                        raise
+                    fallback = routes[route_index + 1]
+                    await append_run_event(
+                        session,
+                        run.id,
+                        "provider.fallback",
+                        {
+                            "purpose": "objective_planning",
+                            "from_provider": route.provider,
+                            "to_provider": fallback.provider,
+                            "reason": str(route_error)[:500],
+                        },
+                    )
+                    await session.commit()
+                    continue
+                if invocation:
+                    _apply_provider_result(invocation, route_result)
+                    invocation.status = "completed"
+                    invocation.duration_ms = int(
+                        (time.monotonic() - started_at) * 1000
+                    )
+                    if workflow["retain_invocation_output"]:
+                        invocation.output_excerpt = output[-4000:]
+                break
+            for position, description in enumerate(criteria, start=1):
+                session.add(
+                    VerificationCriterion(
+                        run_id=run.id,
+                        position=position,
+                        description=description,
+                    )
                 )
-            for item in tasks:
+            for position, item in enumerate(tasks, start=1):
                 role = item.get("agent_role", "developer")
                 assigned_agent = None
                 if workflow["auto_assign_tasks"]:
@@ -211,6 +372,9 @@ async def _plan(run_id: uuid.UUID) -> None:
                         run_id=run.id,
                         title=item["title"],
                         description=item.get("description"),
+                        position=position,
+                        depends_on_positions=item["depends_on"],
+                        predicted_files=item["predicted_files"],
                         agent_role=role,
                         assigned_agent_id=assigned_agent.id if assigned_agent else None,
                     )
@@ -224,24 +388,18 @@ async def _plan(run_id: uuid.UUID) -> None:
                 run.status = "completed"
                 run.current_step = "planned"
                 objective.status = "planned"
-            if invocation:
-                invocation.status = "completed"
-                invocation.duration_ms = int((time.monotonic() - started_at) * 1000)
-                if workflow["retain_invocation_output"]:
-                    invocation.output_excerpt = output[-4000:]
             await append_run_event(
                 session,
                 run_id,
                 "planner.completed",
-                {"task_count": len(tasks)},
+                {"task_count": len(tasks), "acceptance_criteria_count": len(criteria)},
             )
         except Exception as error:
             run.status = "failed"
             run.current_step = "planner"
             objective.status = "failed"
-            if invocation:
+            if invocation and invocation.status == "running":
                 invocation.status = "failed"
-                invocation.duration_ms = int((time.monotonic() - started_at) * 1000)
                 invocation.error = str(error)[:4000]
                 if output and workflow["retain_invocation_output"]:
                     invocation.output_excerpt = output[-4000:]

@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Cpu, RefreshCw, Save, ShieldCheck, SlidersHorizontal } from "lucide-react";
+import { Box, Cpu, Radar, RefreshCw, Save, ShieldCheck, SlidersHorizontal } from "lucide-react";
 import { ModulePlaceholder } from "@/components/layout/module-placeholder";
 import { useAdminToken } from "@/features/auth/use-admin-token";
 import {
   catalogApi,
   type ProviderStatus,
+  type SandboxStatus,
   type WorkflowSettings,
 } from "@/features/catalog/api";
 import { ProviderConnectionCard } from "@/features/catalog/provider-connection";
@@ -18,9 +19,13 @@ const defaults: WorkflowSettings = {
   require_execution_approval: true,
   auto_assign_tasks: true,
   max_planning_tasks: 20,
+  max_parallel_tasks: 3,
   provider_timeout_seconds: 1800,
+  enable_provider_fallback: true,
   allow_repository_writes: false,
   retain_invocation_output: true,
+  enable_continuous_operations: false,
+  scheduler_poll_seconds: 30,
 };
 
 export default function SettingsPage() {
@@ -28,20 +33,23 @@ export default function SettingsPage() {
   const [standards, setStandards] = useState("");
   const [workflow, setWorkflow] = useState<WorkflowSettings>(defaults);
   const [providers, setProviders] = useState<Record<string, ProviderStatus>>({});
+  const [sandboxes, setSandboxes] = useState<SandboxStatus | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
   const load = useCallback(async () => {
     if (!token) return;
     try {
-      const [coding, configured, providerData] = await Promise.all([
+      const [coding, configured, providerData, sandboxData] = await Promise.all([
         catalogApi.codingStandards(token),
         catalogApi.workflowSettings(token),
         catalogApi.providers(token),
+        catalogApi.sandboxes(token).catch(() => null),
       ]);
       setStandards(coding.value);
       setWorkflow(configured);
       setProviders(providerData.providers);
+      setSandboxes(sandboxData);
       setError("");
       setMessage("");
     } catch (cause) {
@@ -98,9 +106,10 @@ export default function SettingsPage() {
         <Panel icon={SlidersHorizontal} eyebrow="Workflow" title="Planning and execution">
           <div className="grid gap-4 sm:grid-cols-2">
             <NumberField label="Maximum plan tasks" value={workflow.max_planning_tasks} min={1} max={50} onChange={(max_planning_tasks) => setWorkflow({ ...workflow, max_planning_tasks })} />
+            <NumberField label="Parallel task limit" value={workflow.max_parallel_tasks} min={1} max={5} onChange={(max_parallel_tasks) => setWorkflow({ ...workflow, max_parallel_tasks })} />
             <NumberField label="Provider timeout (sec)" value={workflow.provider_timeout_seconds} min={30} max={1800} onChange={(provider_timeout_seconds) => setWorkflow({ ...workflow, provider_timeout_seconds })} />
           </div>
-          <div className="mt-5 space-y-3"><Toggle label="Automatically assign generated tasks" detail="Match each task role to the first enabled agent with that role." checked={workflow.auto_assign_tasks} onChange={(auto_assign_tasks) => setWorkflow({ ...workflow, auto_assign_tasks })} /><Toggle label="Retain provider output excerpts" detail="Store up to 4,000 characters with invocation history for diagnostics." checked={workflow.retain_invocation_output} onChange={(retain_invocation_output) => setWorkflow({ ...workflow, retain_invocation_output })} /></div>
+          <div className="mt-5 space-y-3"><Toggle label="Automatically assign generated tasks" detail="Match each task role to the first enabled agent with that role." checked={workflow.auto_assign_tasks} onChange={(auto_assign_tasks) => setWorkflow({ ...workflow, auto_assign_tasks })} /><Toggle label="Provider fallback" detail="Try the other connected provider once when the primary provider fails or returns unusable structured output." checked={workflow.enable_provider_fallback} onChange={(enable_provider_fallback) => setWorkflow({ ...workflow, enable_provider_fallback })} /><Toggle label="Retain provider output excerpts" detail="Store up to 4,000 characters with invocation history for diagnostics." checked={workflow.retain_invocation_output} onChange={(retain_invocation_output) => setWorkflow({ ...workflow, retain_invocation_output })} /></div>
         </Panel>
 
         <Panel icon={ShieldCheck} eyebrow="Safety" title="Execution controls">
@@ -110,6 +119,41 @@ export default function SettingsPage() {
             <Toggle label="Require execution approval" detail="After Build project is pressed, require a separate approval before agents can edit files." checked={workflow.require_execution_approval} onChange={(require_execution_approval) => setWorkflow({ ...workflow, require_execution_approval })} />
           </div>
           <p className="mt-4 text-[10px] leading-5 text-dim">Agent profiles control the provider and model used for their assigned tasks.</p>
+        </Panel>
+
+        <Panel icon={Box} eyebrow="Isolation" title="Disposable execution containers">
+          <div className="flex items-center justify-between border border-[#292824] p-3">
+            <span className="text-xs text-terminal">Sandbox supervisor</span>
+            <span className={`text-[9px] font-bold uppercase ${sandboxes?.status === "operational" ? "text-phosphor" : "text-orange-300"}`}>
+              {sandboxes?.status ?? "unavailable"}
+            </span>
+          </div>
+          <p className="mt-3 text-[10px] leading-5 text-dim">
+            Every provider invocation and project command starts in a fresh container and is
+            removed on completion, timeout, or disconnect. Runtime commands are offline and
+            credential-free; provider sandboxes receive only the provider credential volumes.
+          </p>
+          {sandboxes?.limits && (
+            <dl className="mt-3 grid grid-cols-3 gap-2 text-center">
+              <div className="border border-[#292824] p-2"><dt className="text-[9px] uppercase text-dim">Memory</dt><dd className="mt-1 text-xs text-terminal">{sandboxes.limits.memory}</dd></div>
+              <div className="border border-[#292824] p-2"><dt className="text-[9px] uppercase text-dim">CPUs</dt><dd className="mt-1 text-xs text-terminal">{sandboxes.limits.cpus}</dd></div>
+              <div className="border border-[#292824] p-2"><dt className="text-[9px] uppercase text-dim">PIDs</dt><dd className="mt-1 text-xs text-terminal">{sandboxes.limits.pids}</dd></div>
+            </dl>
+          )}
+          <p className="mt-3 text-[10px] text-dim">
+            Active containers: {sandboxes?.activeSandboxes.length ?? 0}. Limits are controlled
+            by SANDBOX_MEMORY, SANDBOX_CPUS, and SANDBOX_PIDS in the deployment environment.
+          </p>
+        </Panel>
+
+        <Panel icon={Radar} eyebrow="Continuous operations" title="Unattended maintenance">
+          <div className="space-y-3">
+            <Toggle label="Enable continuous operations" detail="Let scheduled maintenance checks run unattended and propose work. Findings still require your approval before anything executes." checked={workflow.enable_continuous_operations} onChange={(enable_continuous_operations) => setWorkflow({ ...workflow, enable_continuous_operations })} warning />
+          </div>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <NumberField label="Scheduler poll (sec)" value={workflow.scheduler_poll_seconds} min={5} max={3600} onChange={(scheduler_poll_seconds) => setWorkflow({ ...workflow, scheduler_poll_seconds })} />
+          </div>
+          <p className="mt-4 text-[10px] leading-5 text-dim">Configure and review schedules and findings on the Operations page. Continuous operations is off by default; nothing runs unattended until you enable it here.</p>
         </Panel>
 
         <Panel icon={Save} eyebrow="Standards" title="Global coding standards">

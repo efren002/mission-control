@@ -24,6 +24,8 @@ from mission_control.infrastructure.database.models import (
     Run,
     RunEvent,
     Task,
+    VerificationCriterion,
+    VerificationEvidence,
 )
 from mission_control.infrastructure.database.session import get_session
 
@@ -42,6 +44,10 @@ class RunSummary(BaseModel):
     repository_id: uuid.UUID | None
     status: str
     current_step: str | None
+    worktree_branch: str | None
+    worktree_status: str | None
+    baseline_sha: str | None
+    integration_sha: str | None
     task_count: int
     approval_status: str | None
     created_at: datetime
@@ -50,12 +56,20 @@ class RunSummary(BaseModel):
 
 class RunTaskResponse(BaseModel):
     id: uuid.UUID
+    position: int
+    depends_on_positions: list[int]
     title: str
     description: str | None
     status: str
     agent_role: str
     assigned_agent_id: uuid.UUID | None
     checkpoint_sha: str | None
+    worktree_branch: str | None
+    worktree_status: str | None
+    integration_sha: str | None
+    conflict_files: list[str]
+    conflict_detail: str | None
+    conflict_detected_at: datetime | None
 
     model_config = {"from_attributes": True}
 
@@ -76,7 +90,16 @@ class RunInvocationResponse(BaseModel):
     agent_name: str
     purpose: str
     status: str
+    provider: str | None
+    model: str | None
+    attempt: int
+    fallback_from_provider: str | None
+    routing_reason: str | None
     duration_ms: int | None
+    input_tokens: int | None
+    cached_input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
     input_excerpt: str | None
     output_excerpt: str | None
     error: str | None
@@ -86,6 +109,7 @@ class RunInvocationResponse(BaseModel):
 
 class RunApprovalResponse(BaseModel):
     id: uuid.UUID
+    task_id: uuid.UUID | None
     kind: str
     status: str
     decision_reason: str | None
@@ -95,11 +119,39 @@ class RunApprovalResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class VerificationCriterionResponse(BaseModel):
+    id: uuid.UUID
+    position: int
+    description: str
+    status: str
+    evidence: str | None
+    verifier_agent_id: uuid.UUID | None
+    verified_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+class VerificationEvidenceResponse(BaseModel):
+    id: uuid.UUID
+    kind: str
+    status: str
+    command: str | None
+    exit_code: int | None
+    output_excerpt: str | None
+    error: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
 class RunDetail(RunSummary):
     tasks: list[RunTaskResponse]
     events: list[RunEventResponse]
     invocations: list[RunInvocationResponse]
     approvals: list[RunApprovalResponse]
+    verification_criteria: list[VerificationCriterionResponse]
+    verification_evidence: list[VerificationEvidenceResponse]
 
 
 class ExecutionRequest(BaseModel):
@@ -149,6 +201,10 @@ async def _summaries(
             repository_id=run.repository_id,
             status=run.status,
             current_step=run.current_step,
+            worktree_branch=run.worktree_branch,
+            worktree_status=run.worktree_status,
+            baseline_sha=run.baseline_sha,
+            integration_sha=run.integration_sha,
             task_count=task_counts.get(run.id, 0),
             approval_status=approval_statuses.get(run.id),
             created_at=run.created_at,
@@ -205,7 +261,7 @@ async def get_run(run_id: uuid.UUID, _: Admin, session: Session) -> RunDetail:
     summary = await _summary(session, run, project_id, objective_title)
     tasks = list(
         await session.scalars(
-            select(Task).where(Task.run_id == run.id).order_by(Task.created_at)
+            select(Task).where(Task.run_id == run.id).order_by(Task.position)
         )
     )
     events = list(
@@ -220,6 +276,20 @@ async def get_run(run_id: uuid.UUID, _: Admin, session: Session) -> RunDetail:
             select(Approval)
             .where(Approval.run_id == run.id)
             .order_by(Approval.created_at)
+        )
+    )
+    verification_criteria = list(
+        await session.scalars(
+            select(VerificationCriterion)
+            .where(VerificationCriterion.run_id == run.id)
+            .order_by(VerificationCriterion.position)
+        )
+    )
+    verification_evidence = list(
+        await session.scalars(
+            select(VerificationEvidence)
+            .where(VerificationEvidence.run_id == run.id)
+            .order_by(VerificationEvidence.created_at)
         )
     )
     invocation_rows = (
@@ -237,7 +307,16 @@ async def get_run(run_id: uuid.UUID, _: Admin, session: Session) -> RunDetail:
             agent_name=agent_name,
             purpose=item.purpose,
             status=item.status,
+            provider=item.provider,
+            model=item.model,
+            attempt=item.attempt,
+            fallback_from_provider=item.fallback_from_provider,
+            routing_reason=item.routing_reason,
             duration_ms=item.duration_ms,
+            input_tokens=item.input_tokens,
+            cached_input_tokens=item.cached_input_tokens,
+            output_tokens=item.output_tokens,
+            total_tokens=item.total_tokens,
             input_excerpt=item.input_excerpt,
             output_excerpt=item.output_excerpt,
             error=item.error,
@@ -252,6 +331,14 @@ async def get_run(run_id: uuid.UUID, _: Admin, session: Session) -> RunDetail:
         events=[RunEventResponse.model_validate(item) for item in events],
         invocations=invocations,
         approvals=[RunApprovalResponse.model_validate(item) for item in approvals],
+        verification_criteria=[
+            VerificationCriterionResponse.model_validate(item)
+            for item in verification_criteria
+        ],
+        verification_evidence=[
+            VerificationEvidenceResponse.model_validate(item)
+            for item in verification_evidence
+        ],
     )
 
 
@@ -293,7 +380,7 @@ async def start_execution(
     if project is None or project.status != "active":
         raise HTTPException(status_code=409, detail="Project is not active")
     tasks = list(
-        await session.scalars(select(Task).where(Task.run_id == run.id).order_by(Task.created_at))
+        await session.scalars(select(Task).where(Task.run_id == run.id).order_by(Task.position))
     )
     if not tasks:
         raise HTTPException(status_code=409, detail="Run has no tasks")
@@ -319,6 +406,23 @@ async def start_execution(
             status_code=409,
             detail=f"Assign eligible agents before execution: {', '.join(invalid[:3])}",
         )
+    has_verification_criteria = await session.scalar(
+        select(VerificationCriterion.id)
+        .where(VerificationCriterion.run_id == run.id)
+        .limit(1)
+    )
+    if has_verification_criteria is not None:
+        reviewer = await session.scalar(
+            select(Agent.id)
+            .where(Agent.role == "reviewer", Agent.enabled.is_(True))
+            .order_by(Agent.created_at)
+            .limit(1)
+        )
+        if reviewer is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Enable a reviewer agent before building this verified mission",
+            )
     repository = (
         await session.get(Repository, payload.repository_id)
         if payload.repository_id
@@ -458,8 +562,47 @@ async def resume_execution(
         )
     )
     if not unfinished_tasks:
-        raise HTTPException(
-            status_code=409, detail="No interrupted task is available to resume"
+        if run.current_step not in {
+            "verification",
+            "verification_queued",
+            "verification_tests",
+            "verification_review",
+        }:
+            raise HTTPException(
+                status_code=409, detail="No interrupted task is available to resume"
+            )
+        interruption = "Verification worker stopped or timed out; verification requeued."
+        for invocation in running_invocations:
+            invocation.status = "failed"
+            invocation.error = interruption
+        run.status = "queued_for_execution"
+        run.current_step = "execution_resuming"
+        objective.status = "executing"
+        await append_run_event(
+            session,
+            run.id,
+            "verification.requeued",
+            {
+                "interrupted_invocation_ids": [
+                    str(invocation.id) for invocation in running_invocations
+                ],
+            },
+        )
+        await session.commit()
+        try:
+            from mission_control.workers.actors.executor import execute_run
+
+            execute_run.send(str(run.id))
+        except Exception as error:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Verification recovery was saved but could not be queued: {error}",
+            ) from error
+        return ResumeExecutionResponse(
+            id=run.id,
+            status=run.status,
+            current_step=run.current_step,
+            recovered_tasks=0,
         )
 
     interruption = "Execution worker stopped or timed out; task requeued for recovery."

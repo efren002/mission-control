@@ -50,6 +50,8 @@ services:
     env_file: .env
     environment:
       MISSION_CONTROL_HOST_ROOT: ${PWD}
+      RUNTIME_GATEWAY_URL: http://runtime-gateway:8110
+      RUNTIME_GATEWAY_TOKEN: ${RUNTIME_GATEWAY_TOKEN:-replace-with-a-runtime-gateway-token}
     command: ["uvicorn", "mission_control.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     user: "${REPOSITORY_UID:-1000}:${REPOSITORY_GID:-1000}"
     ports:
@@ -71,7 +73,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    networks: [control-plane]
+    networks: [control-plane, runtime-plane]
 
   worker:
     build:
@@ -81,7 +83,9 @@ services:
     env_file: .env
     environment:
       WORKER_MODE: "true"
-    command: ["dramatiq", "mission_control.workers.actors.system", "mission_control.workers.actors.planner", "mission_control.workers.actors.executor", "mission_control.workers.actors.commands"]
+      RUNTIME_GATEWAY_URL: http://runtime-gateway:8110
+      RUNTIME_GATEWAY_TOKEN: ${RUNTIME_GATEWAY_TOKEN:-replace-with-a-runtime-gateway-token}
+    command: ["dramatiq", "mission_control.workers.actors.system", "mission_control.workers.actors.planner", "mission_control.workers.actors.executor", "mission_control.workers.actors.commands", "mission_control.workers.actors.maintenance"]
     volumes:
       - ./backend:/app
       - runtime_data:/runtime
@@ -92,21 +96,26 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
-    networks: [control-plane]
+    networks: [control-plane, runtime-plane]
 
   provider-gateway:
+    image: mission-control-provider-gateway:latest
     build:
       context: ./providers/gateway
+      target: provider
     restart: unless-stopped
     environment:
       PROVIDER_GATEWAY_TOKEN: ${PROVIDER_GATEWAY_TOKEN:-replace-with-a-separate-long-random-token}
       PROVIDER_GATEWAY_PORT: 8100
       PROVIDER_GATEWAY_WORKSPACE_ROOT: /workspaces
-      PROVIDER_GATEWAY_APP_PORT_RANGE: 8201-8210
+      PROVIDER_GATEWAY_WORKTREE_ROOT: /workspaces/worktrees
       CODEX_HOME: /home/runner/.codex
       CLAUDE_CONFIG_DIR: /home/runner/.claude
       HOME: /home/runner
       DISABLE_AUTOUPDATER: 1
+      SANDBOX_SUPERVISOR_URL: http://sandbox-supervisor:8120
+      SANDBOX_SUPERVISOR_TOKEN: ${SANDBOX_SUPERVISOR_TOKEN:-replace-with-a-sandbox-supervisor-token}
+      SANDBOX_REQUIRED: "true"
     volumes:
       - runtime_data:/workspaces
       - ${REPOSITORY_HOST_ROOT:-./repositories}:/workspaces/repositories
@@ -117,13 +126,102 @@ services:
       - "${REPOSITORY_GID:-1000}"
     ports:
       - "127.0.0.1:8100:8100"
-      - "127.0.0.1:8201-8210:8201-8210"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:8100/health').then(r => { if (!r.ok) process.exit(1) })"]
       interval: 10s
       timeout: 5s
       retries: 10
     networks: [control-plane]
+    depends_on:
+      sandbox-supervisor:
+        condition: service_healthy
+
+  runtime-gateway:
+    image: mission-control-provider-gateway:latest
+    build:
+      context: ./providers/gateway
+      target: provider
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+    tmpfs:
+      - /tmp:size=536870912,mode=1777,uid=10001,gid=10001
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
+    environment:
+      PROVIDER_GATEWAY_TOKEN: ${RUNTIME_GATEWAY_TOKEN:-replace-with-a-runtime-gateway-token}
+      PROVIDER_GATEWAY_PORT: 8110
+      PROVIDER_GATEWAY_WORKSPACE_ROOT: /workspaces
+      PROVIDER_GATEWAY_APP_PORT_RANGE: 8201-8210
+      PROVIDER_GATEWAY_RUNTIME_ONLY: "true"
+      HOME: /home/runner
+      DISABLE_AUTOUPDATER: 1
+      SANDBOX_SUPERVISOR_URL: http://sandbox-supervisor:8120
+      SANDBOX_SUPERVISOR_TOKEN: ${SANDBOX_SUPERVISOR_TOKEN:-replace-with-a-sandbox-supervisor-token}
+      SANDBOX_REQUIRED: "true"
+    volumes:
+      - runtime_data:/workspaces
+      - ${REPOSITORY_HOST_ROOT:-./repositories}:/workspaces/repositories
+    group_add:
+      - "${REPOSITORY_GID:-1000}"
+    ports:
+      - "127.0.0.1:8110:8110"
+      - "127.0.0.1:8201-8210:8201-8210"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8110/health').then(r => { if (!r.ok) process.exit(1) })"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [runtime-plane, runtime-ingress]
+    depends_on:
+      sandbox-supervisor:
+        condition: service_healthy
+
+  sandbox-supervisor:
+    build:
+      context: ./providers/gateway
+      target: supervisor
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    environment:
+      HOME: /tmp
+      SANDBOX_SUPERVISOR_TOKEN: ${SANDBOX_SUPERVISOR_TOKEN:-replace-with-a-sandbox-supervisor-token}
+      SANDBOX_IMAGE: mission-control-provider-gateway:latest
+      SANDBOX_RUNTIME_VOLUME: mission-control_runtime_data
+      SANDBOX_CODEX_VOLUME: mission-control_codex_credentials
+      SANDBOX_CLAUDE_VOLUME: mission-control_claude_credentials
+      SANDBOX_REPOSITORY_HOST_ROOT: ${PWD}/${REPOSITORY_HOST_ROOT:-repositories}
+      SANDBOX_ATTACHMENT_HOST_ROOT: ${PWD}/${ATTACHMENT_HOST_ROOT:-attachments}
+      SANDBOX_REPOSITORY_GID: ${REPOSITORY_GID:-1000}
+      SANDBOX_MEMORY: ${SANDBOX_MEMORY:-2g}
+      SANDBOX_CPUS: ${SANDBOX_CPUS:-2}
+      SANDBOX_PIDS: ${SANDBOX_PIDS:-256}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    tmpfs:
+      - /tmp:size=67108864,mode=1777
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8120/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [control-plane, runtime-plane]
 
   web:
     build:
@@ -147,12 +245,24 @@ services:
 networks:
   control-plane:
     driver: bridge
+  runtime-plane:
+    driver: bridge
+    internal: true
+  runtime-ingress:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
 
 volumes:
   postgres_data:
+    name: mission-control_postgres_data
   redis_data:
+    name: mission-control_redis_data
   runtime_data:
+    name: mission-control_runtime_data
   web_node_modules:
   web_next:
   codex_credentials:
+    name: mission-control_codex_credentials
   claude_credentials:
+    name: mission-control_claude_credentials

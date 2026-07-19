@@ -15,6 +15,7 @@ from mission_control.application.services.attachments import (
 )
 from mission_control.application.services.job_dispatch import dispatch_pending_jobs
 from mission_control.application.services.objectives import ObjectiveService
+from mission_control.application.services.provider_routing import provider_routes
 from mission_control.application.services.settings import get_workflow_settings
 from mission_control.core.security import require_local_admin
 from mission_control.infrastructure.database.models import Agent
@@ -35,6 +36,12 @@ async def ensure_planner_provider_ready(session: AsyncSession) -> None:
     )
     workflow = await get_workflow_settings(session)
     provider = planner_agent.provider if planner_agent else str(workflow["planner_provider"])
+    model = planner_agent.model if planner_agent else workflow["planner_model"]
+    routes = provider_routes(
+        provider,
+        str(model) if model else None,
+        fallback_enabled=bool(workflow["enable_provider_fallback"]),
+    )
     try:
         payload = await ProviderGatewayClient().providers()
     except Exception as error:
@@ -43,22 +50,36 @@ async def ensure_planner_provider_ready(session: AsyncSession) -> None:
             detail=f"Unable to verify planner provider: {error}",
         ) from error
     providers = payload.get("providers")
-    provider_status = providers.get(provider) if isinstance(providers, dict) else None
-    if not isinstance(provider_status, dict) or provider_status.get("installed") is not True:
+    route_statuses = [
+        providers.get(route.provider) if isinstance(providers, dict) else None
+        for route in routes
+    ]
+    if any(
+        isinstance(route_status, dict)
+        and route_status.get("installed") is True
+        and route_status.get("authenticated") is True
+        for route_status in route_statuses
+    ):
+        return
+    if not any(
+        isinstance(route_status, dict) and route_status.get("installed") is True
+        for route_status in route_statuses
+    ):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Planner provider {provider} is unavailable",
+            detail=(
+                "No configured planner route is available: "
+                + ", ".join(route.provider for route in routes)
+            ),
         )
-    if provider_status.get("authenticated") is not True:
-        command = (
-            "docker compose run --rm --no-deps provider-gateway codex login --device-auth"
-            if provider == "codex"
-            else "docker compose run --rm --no-deps provider-gateway claude auth login"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Planner provider {provider} is not authenticated. Run: {command}",
-        )
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "No configured planner route is authenticated. Connect "
+            + " or ".join(route.provider for route in routes)
+            + " in Settings."
+        ),
+    )
 
 
 class ObjectiveCreate(BaseModel):

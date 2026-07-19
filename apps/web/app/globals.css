@@ -82,6 +82,35 @@ body::before {
   }
 }
 
+@keyframes radar-sweep {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes radar-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    box-shadow: 0 0 3px rgb(155 189 134 / 0.4);
+  }
+
+  50% {
+    opacity: 0.9;
+    box-shadow: 0 0 10px rgb(155 189 134 / 0.9);
+  }
+}
+
+@keyframes matrix-fall {
+  from {
+    transform: translateY(-115%);
+  }
+
+  to {
+    transform: translateY(145%);
+  }
+}
+
 .animate-page-in {
   animation: page-in 140ms ease-out both;
 }
@@ -101,6 +130,127 @@ body::before {
   animation: skeleton-shimmer 1.5s ease-in-out infinite;
 }
 
+.radar-display {
+  position: absolute;
+  right: -3.5rem;
+  bottom: -5.5rem;
+  width: 15rem;
+  aspect-ratio: 1;
+  pointer-events: none;
+  opacity: 0.24;
+  border: 1px solid rgb(155 189 134 / 0.28);
+  border-radius: 9999px;
+  background-image:
+    linear-gradient(
+      90deg,
+      transparent 49.6%,
+      rgb(155 189 134 / 0.18) 50%,
+      transparent 50.4%
+    ),
+    linear-gradient(
+      transparent 49.6%,
+      rgb(155 189 134 / 0.18) 50%,
+      transparent 50.4%
+    ),
+    repeating-radial-gradient(
+      circle,
+      transparent 0 17%,
+      rgb(155 189 134 / 0.2) 17.5% 18%,
+      transparent 18.5% 34%
+    );
+}
+
+.radar-display::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  border-radius: inherit;
+  background: conic-gradient(
+    from 25deg,
+    transparent 0deg 292deg,
+    rgb(155 189 134 / 0.03) 310deg,
+    rgb(155 189 134 / 0.42) 358deg,
+    transparent 360deg
+  );
+  animation: radar-sweep 5.5s linear infinite;
+}
+
+.radar-blip {
+  position: absolute;
+  z-index: 1;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: #9bbd86;
+  animation: radar-pulse 2.4s ease-in-out infinite;
+}
+
+.radar-blip-one {
+  top: 29%;
+  left: 43%;
+}
+
+.radar-blip-two {
+  top: 55%;
+  left: 70%;
+  animation-delay: -0.8s;
+}
+
+.radar-blip-three {
+  top: 68%;
+  left: 32%;
+  animation-delay: -1.6s;
+}
+
+.matrix-backdrop {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  justify-content: space-around;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0.2;
+  color: #9bbd86;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(155 189 134 / 0.025),
+    transparent
+  );
+  mask-image: linear-gradient(to bottom, transparent, black 10%, black 90%);
+}
+
+.matrix-backdrop span {
+  width: 1ch;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+  text-align: center;
+  text-shadow: 0 0 6px rgb(155 189 134 / 0.9);
+  animation: matrix-fall 15s linear infinite;
+  animation-delay: -2s;
+}
+
+.matrix-backdrop span:nth-child(2n) {
+  color: #d7d3cc;
+  animation-duration: 19s;
+  animation-delay: -11s;
+}
+
+.matrix-backdrop span:nth-child(3n) {
+  animation-duration: 23s;
+  animation-delay: -17s;
+}
+
+.matrix-backdrop span:nth-child(4n) {
+  animation-duration: 17s;
+  animation-delay: -6s;
+}
+
+.matrix-backdrop span:nth-child(5n) {
+  animation-duration: 21s;
+  animation-delay: -14s;
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
@@ -108,7 +258,10 @@ body::before {
 
   .animate-page-in,
   .route-progress > span,
-  .skeleton {
+  .skeleton,
+  .radar-display::after,
+  .radar-blip,
+  .matrix-backdrop span {
     animation: none;
   }
 }

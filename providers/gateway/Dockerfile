@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim
+FROM node:22-bookworm-slim AS provider
 
 ENV NODE_ENV=production \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
@@ -31,3 +31,14 @@ COPY test ./test
 USER runner
 EXPOSE 8100
 CMD ["npm", "start"]
+
+FROM docker:28-cli AS supervisor
+
+RUN apk add --no-cache nodejs
+
+WORKDIR /app
+COPY src/sandbox-supervisor.mjs ./sandbox-supervisor.mjs
+
+EXPOSE 8120
+ENTRYPOINT ["node"]
+CMD ["sandbox-supervisor.mjs"]

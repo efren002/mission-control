@@ -13,6 +13,9 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from mission_control.api.v1.router import api_router
 from mission_control.application.services.agents import AgentService
 from mission_control.application.services.job_dispatch import dispatch_loop
+from mission_control.application.services.maintenance_scheduler import (
+    maintenance_scheduler_loop,
+)
 from mission_control.core.config import get_settings
 from mission_control.core.logging import configure_logging
 from mission_control.infrastructure.database.session import async_session_factory, close_database
@@ -73,9 +76,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await seed_default_agents()
     dispatch_stop = asyncio.Event()
     dispatcher = asyncio.create_task(dispatch_loop(dispatch_stop))
+    scheduler = asyncio.create_task(maintenance_scheduler_loop(dispatch_stop))
     yield
     dispatch_stop.set()
     await dispatcher
+    await scheduler
     await close_database()
     logger.info("mission_control_stopped")
 

@@ -1,12 +1,22 @@
-.PHONY: setup bootstrap up down logs migrate test lint format api-shell web-shell
+.PHONY: setup bootstrap up up-runtime-egress down logs migrate test lint format api-shell web-shell
 
 setup:
 	@if [ -f .env ]; then \
-		echo ".env already exists; leaving it unchanged."; \
+		if ! grep -q '^RUNTIME_GATEWAY_TOKEN=' .env; then \
+			echo "RUNTIME_GATEWAY_TOKEN=$$(openssl rand -hex 32)" >> .env; \
+			echo "Added a generated runtime gateway token to .env."; \
+		fi; \
+		if ! grep -q '^SANDBOX_SUPERVISOR_TOKEN=' .env; then \
+			echo "SANDBOX_SUPERVISOR_TOKEN=$$(openssl rand -hex 32)" >> .env; \
+			echo "Added a generated sandbox supervisor token to .env."; \
+		fi; \
+		echo ".env already exists; existing values were left unchanged."; \
 	else \
 		cp .env.example .env; \
 		sed -i "s/^LOCAL_ADMIN_TOKEN=.*/LOCAL_ADMIN_TOKEN=$$(openssl rand -hex 32)/" .env; \
 		sed -i "s/^PROVIDER_GATEWAY_TOKEN=.*/PROVIDER_GATEWAY_TOKEN=$$(openssl rand -hex 32)/" .env; \
+		sed -i "s/^RUNTIME_GATEWAY_TOKEN=.*/RUNTIME_GATEWAY_TOKEN=$$(openssl rand -hex 32)/" .env; \
+		sed -i "s/^SANDBOX_SUPERVISOR_TOKEN=.*/SANDBOX_SUPERVISOR_TOKEN=$$(openssl rand -hex 32)/" .env; \
 		echo "Created .env with generated admin and gateway tokens."; \
 	fi
 
@@ -16,6 +26,9 @@ bootstrap: setup
 
 up: setup
 	docker compose up --build
+
+up-runtime-egress: setup
+	docker compose -f compose.yaml -f compose.runtime-egress.yaml up --build
 
 down:
 	docker compose down

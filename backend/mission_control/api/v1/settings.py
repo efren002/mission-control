@@ -25,9 +25,13 @@ class WorkflowSettings(BaseModel):
     require_execution_approval: bool = True
     auto_assign_tasks: bool = True
     max_planning_tasks: int = Field(default=20, ge=1, le=50)
+    max_parallel_tasks: int = Field(default=3, ge=1, le=5)
     provider_timeout_seconds: int = Field(default=1800, ge=30, le=1800)
+    enable_provider_fallback: bool = True
     allow_repository_writes: bool = False
     retain_invocation_output: bool = False
+    enable_continuous_operations: bool = False
+    scheduler_poll_seconds: int = Field(default=30, ge=5, le=3600)
 
 
 @router.get("/workflow", response_model=WorkflowSettings)

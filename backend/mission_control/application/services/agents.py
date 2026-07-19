@@ -7,7 +7,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mission_control.infrastructure.database.models import Agent, AgentInvocation
+from mission_control.infrastructure.database.models import (
+    Agent,
+    AgentInvocation,
+    ConflictResolutionAttempt,
+)
 
 DEFAULT_AGENT_PROFILES: tuple[dict[str, str], ...] = (
     {
@@ -131,6 +135,16 @@ class AgentService:
 
     async def delete(self, agent_id: uuid.UUID) -> None:
         await self.get(agent_id)
+        has_resolution_history = await self.session.scalar(
+            select(ConflictResolutionAttempt.id)
+            .where(ConflictResolutionAttempt.agent_id == agent_id)
+            .limit(1)
+        )
+        if has_resolution_history is not None:
+            raise ValueError(
+                "This agent has conflict-resolution evidence and cannot be deleted; "
+                "disable it instead"
+            )
         await self.session.execute(delete(Agent).where(Agent.id == agent_id))
         await self.session.commit()
 

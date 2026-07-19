@@ -10,6 +10,7 @@ import {
   GitBranch,
   ListTodo,
   Menu,
+  Radar,
   Rocket,
   Settings,
   Target,
@@ -30,7 +31,10 @@ const navigationSections = [
   },
   {
     label: "Build",
-    items: [{ label: "Missions", href: "/missions", icon: Rocket }],
+    items: [
+      { label: "Missions", href: "/missions", icon: Rocket },
+      { label: "Operations", href: "/operations", icon: Radar },
+    ],
   },
   {
     label: "Setup",
