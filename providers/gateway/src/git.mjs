@@ -22,17 +22,20 @@ const commitIdentity = [
   "user.email=agents@mission-control.local",
 ];
 
-// Installed-dependency directories, and any generated .env, are
-// conventionally gitignored, so neither a fresh `git worktree add` nor a
-// merge-based integration ever carries them across worktree boundaries.
-// Copying straight from the filesystem (only when the target's manifest
-// exists and it has nothing there yet) keeps tests runnable without
-// re-installing packages or losing a bootstrap task's generated .env inside
-// a network-isolated sandbox.
+// Installed-dependency directories, any generated .env, and compiled
+// frontend build output are conventionally gitignored, so neither a fresh
+// `git worktree add` nor a merge-based integration ever carries them
+// across worktree boundaries. Copying straight from the filesystem (only
+// when the target's manifest exists and it has nothing there yet) keeps
+// tests and previews runnable without re-running installs or asset builds
+// inside runtime-gateway's network-isolated sandbox, where they can't
+// reliably be redone from scratch.
 const DEPENDENCY_DIRECTORIES = [
   { manifest: "composer.json", directory: "vendor" },
   { manifest: "package.json", directory: "node_modules" },
   { manifest: ".env.example", directory: ".env" },
+  { manifest: "vite.config.js", directory: "public/build" },
+  { manifest: "vite.config.ts", directory: "public/build" },
 ];
 
 async function syncDependencyDirectories(sourceDir, targetDir) {

@@ -146,18 +146,22 @@ test("gitIntegrateWorktree copies gitignored dependency directories and .env int
   const runId = "4198f342-7b3d-4a21-8c11-63c7b229d882";
   try {
     const created = await gitCreateWorktree(workspace, runId, worktreeRoot);
-    writeFileSync(join(created.worktree, ".gitignore"), "/vendor\n/.env\n");
+    writeFileSync(join(created.worktree, ".gitignore"), "/vendor\n/.env\n/public/build\n");
     writeFileSync(join(created.worktree, "composer.json"), "{}\n");
     writeFileSync(join(created.worktree, ".env.example"), "APP_KEY=\n");
+    writeFileSync(join(created.worktree, "vite.config.js"), "export default {};\n");
     mkdirSync(join(created.worktree, "vendor"));
     writeFileSync(join(created.worktree, "vendor", "autoload.php"), "<?php\n");
     writeFileSync(join(created.worktree, ".env"), "APP_KEY=base64:generated\n");
+    mkdirSync(join(created.worktree, "public", "build"), { recursive: true });
+    writeFileSync(join(created.worktree, "public", "build", "manifest.json"), "{}\n");
     await gitCheckpoint(created.worktree, "Bootstrap the Laravel app");
 
     await gitIntegrateWorktree(workspace, created.worktree, created.branch, created.baselineSha);
 
     assert.equal(existsSync(join(workspace, "vendor", "autoload.php")), true);
     assert.equal(existsSync(join(workspace, ".env")), true);
+    assert.equal(existsSync(join(workspace, "public", "build", "manifest.json")), true);
   } finally {
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(workspace, { recursive: true, force: true });
