@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mission_control.infrastructure.database.models import SystemSetting
+from mission_control.infrastructure.database.models import Agent, SystemSetting
 
 WORKFLOW_SETTINGS_KEY = "workflow_settings"
 WORKFLOW_DEFAULTS: dict[str, Any] = {
@@ -51,5 +52,18 @@ async def save_workflow_settings(session: AsyncSession, values: dict[str, Any]) 
         session.add(SystemSetting(key=WORKFLOW_SETTINGS_KEY, value=encoded))
     else:
         setting.value = encoded
+    # The planner actor resolves provider as `planner_agent.provider if planner_agent
+    # else workflow["planner_provider"]`, and a planner agent is seeded at boot — so
+    # the Settings "Planning" dropdown would be dead unless we mirror the choice onto
+    # enabled planner agents here.
+    if "planner_provider" in values or "planner_model" in values:
+        planner_agents = (await session.scalars(
+            select(Agent).where(Agent.role == "planner", Agent.enabled.is_(True))
+        )).all()
+        for agent in planner_agents:
+            if "planner_provider" in values:
+                agent.provider = str(values["planner_provider"])
+            if "planner_model" in values:
+                agent.model = values["planner_model"]
     await session.commit()
     return normalized

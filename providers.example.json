@@ -1,0 +1,30 @@
+{
+  "_comment": "Copy to providers.json and edit. API keys live in .env (referenced by api_key_env), never in this file.",
+  "providers": [
+    {
+      "name": "openrouter",
+      "kind": "http",
+      "format": "openai",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "anthropic/claude-3.5-sonnet",
+      "api_key_env": "OPENROUTER_API_KEY"
+    },
+    {
+      "name": "9router",
+      "kind": "http",
+      "format": "openai",
+      "base_url": "https://9router.com/v1",
+      "model": "gpt-4o",
+      "api_key_env": "NINEROUTER_API_KEY"
+    },
+    {
+      "name": "anthropic-direct",
+      "kind": "http",
+      "format": "anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "model": "claude-3-5-sonnet-20241022",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "max_tokens": 8192
+    }
+  ]
+}

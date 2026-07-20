@@ -104,6 +104,10 @@ services:
       context: ./providers/gateway
       target: provider
     restart: unless-stopped
+    # Lets the gateway reach services running on the Docker host (e.g. a local
+    # LLM) so custom HTTP providers can use http://host.docker.internal:<port>.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       PROVIDER_GATEWAY_TOKEN: ${PROVIDER_GATEWAY_TOKEN:-replace-with-a-separate-long-random-token}
       PROVIDER_GATEWAY_PORT: 8100
@@ -116,12 +120,19 @@ services:
       SANDBOX_SUPERVISOR_URL: http://sandbox-supervisor:8120
       SANDBOX_SUPERVISOR_TOKEN: ${SANDBOX_SUPERVISOR_TOKEN:-replace-with-a-sandbox-supervisor-token}
       SANDBOX_REQUIRED: "true"
+      CUSTOM_PROVIDERS_PATH: /config/providers.json
+      # Master key encrypting HTTP provider API keys at rest in providers.json.
+      PROVIDERS_ENCRYPTION_KEY: ${PROVIDERS_ENCRYPTION_KEY:-}
+      # Rewrite loopback hosts in custom-provider base_urls to host.docker.internal
+      # so `http://localhost:<port>` reaches the operator's host services.
+      PROVIDER_GATEWAY_REWRITE_LOCALHOST: "true"
     volumes:
       - runtime_data:/workspaces
       - ${REPOSITORY_HOST_ROOT:-./repositories}:/workspaces/repositories
       - ${ATTACHMENT_HOST_ROOT:-./attachments}:/workspaces/attachments:ro
       - codex_credentials:/home/runner/.codex
       - claude_credentials:/home/runner/.claude
+      - ${CUSTOM_PROVIDERS_FILE:-./providers.json}:/config/providers.json
     group_add:
       - "${REPOSITORY_GID:-1000}"
     ports:

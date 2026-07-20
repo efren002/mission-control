@@ -69,6 +69,38 @@ def _string_candidates(value: object) -> list[str]:
     return []
 
 
+def _strip_code_fences(text: str) -> str:
+    """Remove ```lang ... ``` markdown fences so fenced JSON parses."""
+    return re.sub(r"```(?:[a-zA-Z0-9_+-]+)?\s*\n?", "", text)
+
+
+def _outermost_object(text: str) -> str:
+    """Slice from the first `{` to the last `}` — drops any wrapping prose."""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return ""
+    return text[start : end + 1]
+
+
+def _parse_plan_object(candidate: object) -> dict[str, object] | None:
+    """Parse a JSON object from a planner output chunk, tolerating markdown
+    fences and surrounding prose. Returns the dict or None."""
+    if not isinstance(candidate, str):
+        return None
+    text = _strip_code_fences(candidate).strip()
+    for attempt in (text, _outermost_object(text)):
+        if not attempt:
+            continue
+        try:
+            value = json.loads(attempt)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
 def _extract_plan(
     output: str, limit: int = 20
 ) -> tuple[list[PlannedTask], list[str]]:
@@ -80,16 +112,7 @@ def _extract_plan(
             continue
         candidates.extend(_string_candidates(event))
     for candidate in candidates:
-        try:
-            value = json.loads(candidate)
-        except json.JSONDecodeError:
-            match = re.search(r"\{\s*\"tasks\"\s*:\s*\[.*\]\s*\}", candidate, re.DOTALL)
-            if not match:
-                continue
-            try:
-                value = json.loads(match.group())
-            except json.JSONDecodeError:
-                continue
+        value = _parse_plan_object(candidate)
         if not isinstance(value, dict) or "tasks" not in value:
             continue
         tasks = value.get("tasks", [])
@@ -298,9 +321,15 @@ async def _plan(run_id: uuid.UUID) -> None:
                         output, int(workflow["max_planning_tasks"])
                     )
                     if not tasks:
+                        preview = (output or "").strip()[-800:]
+                        suffix = (
+                            f" Provider output tail:\n{preview}"
+                            if preview
+                            else " Provider returned no output."
+                        )
                         raise ValueError(
-                            "Planner returned no valid tasks. Expected JSON with a "
-                            "non-empty tasks array."
+                            "Planner returned no valid tasks. Expected JSON "
+                            f"with a non-empty tasks array.{suffix}"
                         )
                     if not criteria:
                         raise ValueError(

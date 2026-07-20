@@ -28,7 +28,12 @@ import {
   type Agent,
   type AgentInput,
   type AgentInvocation,
+  type ProviderStatus,
 } from "@/features/catalog/api";
+import {
+  buildProviderOptions,
+  ProviderSelect,
+} from "@/features/catalog/provider-options";
 import { cn } from "@/lib/cn";
 
 const emptyAgent: AgentInput = {
@@ -51,6 +56,7 @@ export default function AgentsPage() {
   const { token } = useAdminToken();
   const { confirm, confirmDialog } = useConfirm();
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [providers, setProviders] = useState<Record<string, ProviderStatus>>({});
   const [draft, setDraft] = useState<AgentInput>(emptyAgent);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [history, setHistory] = useState<AgentInvocation[]>([]);
@@ -65,7 +71,12 @@ export default function AgentsPage() {
     if (!token) return;
     setLoading(true);
     try {
-      setAgents(await catalogApi.agents(token));
+      const [agentRoster, providerData] = await Promise.all([
+        catalogApi.agents(token),
+        catalogApi.providers(token).catch(() => ({ providers: {} })),
+      ]);
+      setAgents(agentRoster);
+      setProviders(providerData.providers);
       setError("");
     } catch (cause) {
       setError(
@@ -351,20 +362,19 @@ export default function AgentsPage() {
                 </select>
               </Field>
               <Field label="Provider" htmlFor="agent-provider">
-                <select
+                <ProviderSelect
                   id="agent-provider"
+                  options={buildProviderOptions(providers)}
                   value={draft.provider}
-                  onChange={(event) =>
-                    setDraft({
-                      ...draft,
-                      provider: event.target.value as AgentInput["provider"],
-                    })
-                  }
+                  onChange={(provider) => setDraft({ ...draft, provider })}
                   className="field"
-                >
-                  <option value="codex">Codex</option>
-                  <option value="claude">Claude</option>
-                </select>
+                />
+                {providers[draft.provider]?.kind === "http" &&
+                  draft.role === "developer" && (
+                    <span className="mt-2 block text-[9px] leading-4 text-orange-300">
+                      HTTP providers cannot edit the git worktree, so they cannot serve the developer role.
+                    </span>
+                  )}
               </Field>
               <Field label="Model override" htmlFor="agent-model">
                 <input

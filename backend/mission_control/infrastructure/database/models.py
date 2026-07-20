@@ -126,10 +126,8 @@ class Agent(TimestampMixin, Base):
             "role IN ('planner', 'developer', 'qa', 'reviewer')",
             name="ck_agents_role",
         ),
-        CheckConstraint(
-            "provider IN ('codex', 'claude')",
-            name="ck_agents_provider",
-        ),
+        # Provider name constraint dropped in migration 20260720_0027 to allow
+        # custom HTTP providers; role/kind validation now lives in the app layer.
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
@@ -323,15 +321,8 @@ class AgentInvocation(TimestampMixin, Base):
             "status IN ('running', 'completed', 'failed')",
             name="ck_agent_invocations_status",
         ),
-        CheckConstraint(
-            "provider IS NULL OR provider IN ('codex', 'claude')",
-            name="ck_agent_invocations_provider",
-        ),
-        CheckConstraint(
-            "fallback_from_provider IS NULL OR "
-            "fallback_from_provider IN ('codex', 'claude')",
-            name="ck_agent_invocations_fallback_provider",
-        ),
+        # Provider name constraints dropped in migration 20260720_0027 to allow
+        # custom HTTP providers; role/kind validation now lives in the app layer.
         CheckConstraint("attempt >= 1", name="ck_agent_invocations_attempt"),
         CheckConstraint(
             "(input_tokens IS NULL OR input_tokens >= 0) AND "

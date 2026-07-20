@@ -10,6 +10,10 @@ setup:
 			echo "SANDBOX_SUPERVISOR_TOKEN=$$(openssl rand -hex 32)" >> .env; \
 			echo "Added a generated sandbox supervisor token to .env."; \
 		fi; \
+		if ! grep -q '^PROVIDERS_ENCRYPTION_KEY=' .env; then \
+			echo "PROVIDERS_ENCRYPTION_KEY=$$(openssl rand -hex 32)" >> .env; \
+			echo "Added a generated providers encryption key to .env."; \
+		fi; \
 		echo ".env already exists; existing values were left unchanged."; \
 	else \
 		cp .env.example .env; \
@@ -17,6 +21,7 @@ setup:
 		sed -i "s/^PROVIDER_GATEWAY_TOKEN=.*/PROVIDER_GATEWAY_TOKEN=$$(openssl rand -hex 32)/" .env; \
 		sed -i "s/^RUNTIME_GATEWAY_TOKEN=.*/RUNTIME_GATEWAY_TOKEN=$$(openssl rand -hex 32)/" .env; \
 		sed -i "s/^SANDBOX_SUPERVISOR_TOKEN=.*/SANDBOX_SUPERVISOR_TOKEN=$$(openssl rand -hex 32)/" .env; \
+		sed -i "s/^PROVIDERS_ENCRYPTION_KEY=.*/PROVIDERS_ENCRYPTION_KEY=$$(openssl rand -hex 32)/" .env; \
 		echo "Created .env with generated admin and gateway tokens."; \
 	fi
 
