@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { cp, mkdir } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { cp, lstat, mkdir } from "node:fs/promises";
 
 const GIT_TIMEOUT_MS = 30_000;
 const MAX_MESSAGE_CHARS = 500;
@@ -22,28 +22,48 @@ const commitIdentity = [
   "user.email=agents@mission-control.local",
 ];
 
-// Installed-dependency directories, any generated .env, and compiled
-// frontend build output are conventionally gitignored, so neither a fresh
-// `git worktree add` nor a merge-based integration ever carries them
-// across worktree boundaries. Copying straight from the filesystem (only
-// when the target's manifest exists and it has nothing there yet) keeps
-// tests and previews runnable without re-running installs or asset builds
-// inside runtime-gateway's network-isolated sandbox, where they can't
-// reliably be redone from scratch.
-const DEPENDENCY_DIRECTORIES = [
-  { manifest: "composer.json", directory: "vendor" },
-  { manifest: "package.json", directory: "node_modules" },
-  { manifest: ".env.example", directory: ".env" },
-  { manifest: "vite.config.js", directory: "public/build" },
-  { manifest: "vite.config.ts", directory: "public/build" },
-];
+// Installed dependencies, generated config (.env), and compiled build
+// output are conventionally gitignored, so neither a fresh `git worktree
+// add` nor a merge-based integration ever carries them across worktree
+// boundaries. Rather than hardcode a directory per framework/build tool
+// (which only ever covers stacks someone already hit a bug for), read the
+// target's own .gitignore and carry forward whatever simple, literal
+// entries it declares and the source already has built — vendor/,
+// node_modules/, .env, public/build, dist/, or whatever else a project's
+// own install/build step produces. Wildcard and negated patterns are
+// skipped: they typically describe incidental files (*.log, .DS_Store)
+// rather than install/build artifacts, and safely resolving them would
+// need full gitignore glob semantics this doesn't attempt. Symlinks are
+// skipped too, since one built inside a different worktree (e.g. Laravel's
+// `storage:link`) would point at that worktree's own absolute path.
+function gitignoredArtifactPaths(targetDir) {
+  let contents;
+  try {
+    contents = readFileSync(resolve(targetDir, ".gitignore"), "utf8");
+  } catch {
+    return [];
+  }
+  return contents
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#") && !line.startsWith("!"))
+    .filter((line) => !/[*?[]/.test(line))
+    .map((line) => line.replace(/^\/+/, "").replace(/\/+$/, ""))
+    .filter(Boolean);
+}
 
 async function syncDependencyDirectories(sourceDir, targetDir) {
-  for (const { manifest, directory } of DEPENDENCY_DIRECTORIES) {
-    if (!existsSync(resolve(targetDir, manifest))) continue;
-    const sourcePath = resolve(sourceDir, directory);
-    const targetPath = resolve(targetDir, directory);
-    if (!existsSync(sourcePath) || existsSync(targetPath)) continue;
+  for (const relativePath of gitignoredArtifactPaths(targetDir)) {
+    const sourcePath = resolve(sourceDir, relativePath);
+    const targetPath = resolve(targetDir, relativePath);
+    if (existsSync(targetPath)) continue;
+    let sourceStat;
+    try {
+      sourceStat = await lstat(sourcePath);
+    } catch {
+      continue;
+    }
+    if (sourceStat.isSymbolicLink()) continue;
     await cp(sourcePath, targetPath, { recursive: true });
   }
 }

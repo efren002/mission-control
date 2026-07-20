@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -147,9 +155,6 @@ test("gitIntegrateWorktree copies gitignored dependency directories and .env int
   try {
     const created = await gitCreateWorktree(workspace, runId, worktreeRoot);
     writeFileSync(join(created.worktree, ".gitignore"), "/vendor\n/.env\n/public/build\n");
-    writeFileSync(join(created.worktree, "composer.json"), "{}\n");
-    writeFileSync(join(created.worktree, ".env.example"), "APP_KEY=\n");
-    writeFileSync(join(created.worktree, "vite.config.js"), "export default {};\n");
     mkdirSync(join(created.worktree, "vendor"));
     writeFileSync(join(created.worktree, "vendor", "autoload.php"), "<?php\n");
     writeFileSync(join(created.worktree, ".env"), "APP_KEY=base64:generated\n");
@@ -298,15 +303,19 @@ test("conflicting task integration aborts without changing the mission", async (
   }
 });
 
-test("gitCreateTaskWorktree copies gitignored dependency directories from the mission workspace", async () => {
+test("gitCreateTaskWorktree copies any gitignored artifact the mission workspace already built, not just known ones", async () => {
   const { workspace, git } = initRepository();
   const worktreeRoot = mkdtempSync(join(tmpdir(), "gateway-worktrees-"));
   try {
-    writeFileSync(join(workspace, ".gitignore"), "/vendor\n");
-    writeFileSync(join(workspace, "composer.json"), "{}\n");
+    // "dist" stands in for whatever an arbitrary, unrecognized build tool
+    // produces — proving the sync isn't hardcoded to vendor/node_modules/etc.
+    writeFileSync(join(workspace, ".gitignore"), "/vendor\n.env\n/dist\n");
     mkdirSync(join(workspace, "vendor"));
     writeFileSync(join(workspace, "vendor", "autoload.php"), "<?php\n");
-    await gitCheckpoint(workspace, "Scaffold the Laravel app");
+    writeFileSync(join(workspace, ".env"), "APP_KEY=base64:generated\n");
+    mkdirSync(join(workspace, "dist"));
+    writeFileSync(join(workspace, "dist", "bundle.js"), "console.log('built');\n");
+    await gitCheckpoint(workspace, "Scaffold the app");
     assert.equal(git("status", "--porcelain").toString().trim(), "");
 
     const created = await gitCreateTaskWorktree(
@@ -316,19 +325,20 @@ test("gitCreateTaskWorktree copies gitignored dependency directories from the mi
     );
 
     assert.equal(existsSync(join(created.worktree, "vendor", "autoload.php")), true);
+    assert.equal(existsSync(join(created.worktree, ".env")), true);
+    assert.equal(existsSync(join(created.worktree, "dist", "bundle.js")), true);
   } finally {
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(workspace, { recursive: true, force: true });
   }
 });
 
-test("gitIntegrateTaskWorktree copies gitignored dependency directories into the mission workspace", async () => {
+test("gitIntegrateTaskWorktree copies any gitignored artifact a task built, not just known ones", async () => {
   const { workspace } = initRepository();
   const worktreeRoot = mkdtempSync(join(tmpdir(), "gateway-worktrees-"));
   try {
-    writeFileSync(join(workspace, ".gitignore"), "/vendor\n");
-    writeFileSync(join(workspace, "composer.json"), "{}\n");
-    await gitCheckpoint(workspace, "Add composer manifest");
+    writeFileSync(join(workspace, ".gitignore"), "/vendor\n.env\n/dist\n");
+    await gitCheckpoint(workspace, "Add .gitignore");
     const task = await gitCreateTaskWorktree(
       workspace,
       "c198f342-7b3d-4a21-8c11-63c7b229d880",
@@ -336,12 +346,17 @@ test("gitIntegrateTaskWorktree copies gitignored dependency directories into the
     );
     mkdirSync(join(task.worktree, "vendor"));
     writeFileSync(join(task.worktree, "vendor", "autoload.php"), "<?php\n");
+    writeFileSync(join(task.worktree, ".env"), "APP_KEY=base64:generated\n");
+    mkdirSync(join(task.worktree, "dist"));
+    writeFileSync(join(task.worktree, "dist", "bundle.js"), "console.log('built');\n");
     writeFileSync(join(task.worktree, "app.php"), "scaffolded\n");
     await gitCheckpoint(task.worktree, "Scaffold the app");
 
     await gitIntegrateTaskWorktree(workspace, task.worktree, task.branch, task.baselineSha);
 
     assert.equal(existsSync(join(workspace, "vendor", "autoload.php")), true);
+    assert.equal(existsSync(join(workspace, ".env")), true);
+    assert.equal(existsSync(join(workspace, "dist", "bundle.js")), true);
     assert.equal(existsSync(join(workspace, "app.php")), true);
   } finally {
     rmSync(worktreeRoot, { recursive: true, force: true });
@@ -349,47 +364,55 @@ test("gitIntegrateTaskWorktree copies gitignored dependency directories into the
   }
 });
 
-test("gitCreateTaskWorktree copies a generated .env from the mission workspace", async () => {
-  const { workspace, git } = initRepository();
+test("gitCreateTaskWorktree does not follow a gitignored symlink built in a different worktree", async () => {
+  const { workspace } = initRepository();
   const worktreeRoot = mkdtempSync(join(tmpdir(), "gateway-worktrees-"));
   try {
-    writeFileSync(join(workspace, ".gitignore"), "/.env\n");
-    writeFileSync(join(workspace, ".env.example"), "APP_KEY=\n");
-    writeFileSync(join(workspace, ".env"), "APP_KEY=base64:generated\n");
-    await gitCheckpoint(workspace, "Bootstrap the Laravel app");
-    assert.equal(git("status", "--porcelain").toString().trim(), "");
+    writeFileSync(join(workspace, ".gitignore"), "/public/storage\n");
+    mkdirSync(join(workspace, "storage", "app", "public"), { recursive: true });
+    mkdirSync(join(workspace, "public"));
+    symlinkSync(
+      join(workspace, "storage", "app", "public"),
+      join(workspace, "public", "storage"),
+    );
+    await gitCheckpoint(workspace, "Link storage");
 
     const created = await gitCreateTaskWorktree(
       workspace,
-      "d198f342-7b3d-4a21-8c11-63c7b229d880",
+      "f198f342-7b3d-4a21-8c11-63c7b229d880",
       worktreeRoot,
     );
 
-    assert.equal(existsSync(join(created.worktree, ".env")), true);
+    assert.equal(existsSync(join(created.worktree, "public", "storage")), false);
   } finally {
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(workspace, { recursive: true, force: true });
   }
 });
 
-test("gitIntegrateTaskWorktree copies a task's generated .env into the mission workspace", async () => {
+test("gitCreateTaskWorktree ignores wildcard and negated .gitignore entries when syncing artifacts", async () => {
   const { workspace } = initRepository();
   const worktreeRoot = mkdtempSync(join(tmpdir(), "gateway-worktrees-"));
   try {
-    writeFileSync(join(workspace, ".gitignore"), "/.env\n");
-    await gitCheckpoint(workspace, "Init repository");
-    const task = await gitCreateTaskWorktree(
+    writeFileSync(join(workspace, ".gitignore"), "*.log\n!keep.log\n/vendor\n");
+    writeFileSync(join(workspace, "debug.log"), "noise\n");
+    writeFileSync(join(workspace, "keep.log"), "kept\n");
+    mkdirSync(join(workspace, "vendor"));
+    writeFileSync(join(workspace, "vendor", "autoload.php"), "<?php\n");
+    await gitCheckpoint(workspace, "Scaffold the app");
+
+    const created = await gitCreateTaskWorktree(
       workspace,
-      "e198f342-7b3d-4a21-8c11-63c7b229d880",
+      "a198f342-7b3d-4a21-8c11-63c7b229d880",
       worktreeRoot,
     );
-    writeFileSync(join(task.worktree, ".env.example"), "APP_KEY=\n");
-    writeFileSync(join(task.worktree, ".env"), "APP_KEY=base64:generated\n");
-    await gitCheckpoint(task.worktree, "Bootstrap the Laravel app");
 
-    await gitIntegrateTaskWorktree(workspace, task.worktree, task.branch, task.baselineSha);
-
-    assert.equal(existsSync(join(workspace, ".env")), true);
+    assert.equal(existsSync(join(created.worktree, "vendor", "autoload.php")), true);
+    // debug.log matches the wildcard pattern, so the sync correctly leaves it
+    // alone; keep.log is unignored by "!keep.log", so it's a normal tracked
+    // file git's own worktree checkout carries over independent of the sync.
+    assert.equal(existsSync(join(created.worktree, "debug.log")), false);
+    assert.equal(existsSync(join(created.worktree, "keep.log")), true);
   } finally {
     rmSync(worktreeRoot, { recursive: true, force: true });
     rmSync(workspace, { recursive: true, force: true });
