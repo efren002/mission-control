@@ -22,7 +22,11 @@ from mission_control.application.services.prompt_budget import (
     compact_completed_tasks,
     compact_prompt_text,
 )
-from mission_control.application.services.provider_routing import provider_routes
+from mission_control.application.services.provider_routing import (
+    can_assign_role,
+    provider_kind,
+    provider_routes,
+)
 from mission_control.application.services.run_events import append_run_event
 from mission_control.application.services.runtime_detection import detect_commands
 from mission_control.application.services.settings import get_workflow_settings
@@ -60,6 +64,26 @@ VERIFICATION_ACTOR_TIME_LIMIT_MS = 50 * 60 * 1000
 VERIFICATION_OUTPUT_CHARS = 12_000
 RESOLUTION_ACTOR_TIME_LIMIT_MS = 50 * 60 * 1000
 logger = logging.getLogger(__name__)
+
+
+async def _provider_kind_map() -> dict[str, object]:
+    """Fetch the live provider -> {kind, ...} map from the gateway.
+
+    Returns an empty dict on any failure so callers fall back to the legacy
+    cli-only default rather than blocking execution.
+    """
+    try:
+        payload = await ProviderGatewayClient().providers()
+    except Exception:
+        return {}
+    providers = payload.get("providers", {})
+    return providers if isinstance(providers, dict) else {}
+
+
+DEVELOPER_HTTP_ERROR = (
+    "Developer tasks require a CLI provider (codex or claude); "
+    "HTTP providers cannot edit the git worktree."
+)
 
 
 def _preserve_worktree(run: Run) -> None:
@@ -1415,10 +1439,18 @@ async def _execute(run_id: uuid.UUID) -> None:
             completed_tasks=completed_titles,
             image_paths=await list_provider_attachment_paths(session, objective.id),
         )
+        # Load-bearing guard against DB drift: a developer agent backed by an
+        # HTTP provider cannot checkpoint file edits, so refuse before creating
+        # the worktree rather than failing mid-execution.
+        providers = await _provider_kind_map()
+        if not can_assign_role(provider_kind(providers, agent.provider), agent.role):
+            await _fail_run(run, objective, task, DEVELOPER_HTTP_ERROR)
+            return
         routes = provider_routes(
             agent.provider,
             agent.model,
             fallback_enabled=bool(workflow["enable_provider_fallback"]),
+            provider_map=providers,
         )
         primary_route = routes[0]
         invocation = AgentInvocation(
@@ -2004,6 +2036,12 @@ async def _resolve_task_conflict(attempt_id: uuid.UUID) -> None:
         agent_provider = agent.provider
         agent_model = agent.model
         task_title = task.title
+
+    # Conflict resolution also mutates the worktree, so the same developer +
+    # HTTP-provider constraint applies.
+    conflict_providers = await _provider_kind_map()
+    if not can_assign_role(provider_kind(conflict_providers, agent_provider), agent.role):
+        raise RuntimeError(DEVELOPER_HTTP_ERROR)
 
     try:
         prepared = await ProviderGatewayClient().git_prepare_task_resolution(

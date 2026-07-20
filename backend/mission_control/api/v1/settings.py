@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -19,7 +19,7 @@ Admin = Annotated[str, Depends(require_local_admin)]
 
 
 class WorkflowSettings(BaseModel):
-    planner_provider: Literal["codex", "claude"] = "codex"
+    planner_provider: str = "codex"
     planner_model: str | None = Field(default=None, max_length=120)
     require_plan_approval: bool = True
     require_execution_approval: bool = True

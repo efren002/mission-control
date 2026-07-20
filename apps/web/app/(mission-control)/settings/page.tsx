@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Box, Cpu, Radar, RefreshCw, Save, ShieldCheck, SlidersHorizontal } from "lucide-react";
+import { Box, Cpu, Plus, Radar, RefreshCw, Save, ShieldCheck, SlidersHorizontal } from "lucide-react";
 import { ModulePlaceholder } from "@/components/layout/module-placeholder";
 import { useAdminToken } from "@/features/auth/use-admin-token";
 import {
@@ -11,6 +11,12 @@ import {
   type WorkflowSettings,
 } from "@/features/catalog/api";
 import { ProviderConnectionCard } from "@/features/catalog/provider-connection";
+import { CustomProviderForm } from "@/features/catalog/custom-provider-form";
+import {
+  buildProviderOptions,
+  ProviderSelect,
+  type ProviderOption,
+} from "@/features/catalog/provider-options";
 
 const defaults: WorkflowSettings = {
   planner_provider: "codex",
@@ -36,6 +42,8 @@ export default function SettingsPage() {
   const [sandboxes, setSandboxes] = useState<SandboxStatus | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  // null = closed; "create" = new provider; {edit} = editing an existing HTTP provider.
+  const [form, setForm] = useState<null | "create" | { edit: string }>(null);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -68,6 +76,18 @@ export default function SettingsPage() {
     }
   }, [token]);
 
+  const deleteProvider = useCallback(async (name: string) => {
+    if (!token) return;
+    if (!window.confirm(`Delete custom provider "${name}"? This cannot be undone.`)) return;
+    try {
+      setProviders((await catalogApi.deleteCustomProvider(token, name)).providers);
+      setMessage(`Deleted ${name}.`);
+      setError("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to delete provider");
+    }
+  }, [token]);
+
   const save = async () => {
     try {
       const [coding, configured] = await Promise.all([
@@ -94,12 +114,38 @@ export default function SettingsPage() {
       <section className="mt-6 grid gap-4 xl:grid-cols-2">
         <Panel icon={Cpu} eyebrow="Providers" title="Routing and models">
           <div className="grid gap-4 sm:grid-cols-2">
-            <ProviderFields title="Planning" provider={workflow.planner_provider} model={workflow.planner_model} onProvider={(planner_provider) => setWorkflow({ ...workflow, planner_provider })} onModel={(planner_model) => setWorkflow({ ...workflow, planner_model })} />
+            <ProviderFields title="Planning" provider={workflow.planner_provider} model={workflow.planner_model} options={buildProviderOptions(providers)} onProvider={(planner_provider) => setWorkflow({ ...workflow, planner_provider })} onModel={(planner_model) => setWorkflow({ ...workflow, planner_model })} />
           </div>
           <div className="mt-5 grid gap-2 sm:grid-cols-2">
             <ProviderConnectionCard provider="codex" status={providers.codex} token={token} onAuthenticated={refreshProviders} />
             <ProviderConnectionCard provider="claude" status={providers.claude} token={token} onAuthenticated={refreshProviders} />
+            {httpProviderEntries(providers).map(({ name, status }) => (
+              <ProviderConnectionCard
+                key={name}
+                provider={name}
+                status={status}
+                token={token}
+                onAuthenticated={refreshProviders}
+                onEdit={() => setForm({ edit: name })}
+                onDelete={() => void deleteProvider(name)}
+              />
+            ))}
           </div>
+          {form ? (
+            <div className="mt-5">
+              <CustomProviderForm
+                mode={form === "create" ? "create" : "update"}
+                initial={form === "create" ? undefined : httpProviderInitial(providers, form.edit)}
+                token={token}
+                onSaved={() => { setForm(null); void refreshProviders(); }}
+                onCancel={() => setForm(null)}
+              />
+            </div>
+          ) : (
+            <button onClick={() => setForm("create")} className="mt-5 inline-flex items-center gap-2 border border-[#292824] px-4 py-2 text-[10px] uppercase tracking-wider text-dim hover:border-signal hover:text-signal">
+              <Plus className="h-3 w-3" /> Add custom provider
+            </button>
+          )}
           <p className="mt-4 text-[10px] leading-5 text-dim">Connect starts the provider&apos;s own sign-in flow inside the gateway container. Credentials stay in the gateway volume and survive rebuilds; they are never displayed or stored by the dashboard.</p>
         </Panel>
 
@@ -167,7 +213,37 @@ export default function SettingsPage() {
 
 function Panel({ icon: Icon, eyebrow, title, children }: { icon: React.ComponentType<{ className?: string }>; eyebrow: string; title: string; children: React.ReactNode }) { return <article className="control-panel p-5"><div className="mb-5 flex items-center justify-between"><div><p className="eyebrow">{eyebrow}</p><h2 className="mt-2 text-sm font-semibold text-terminal">{title}</h2></div><Icon className="h-4 w-4 text-signal" /></div>{children}</article>; }
 
-function ProviderFields({ title, provider, model, onProvider, onModel }: { title: string; provider: "codex" | "claude"; model: string | null; onProvider: (value: "codex" | "claude") => void; onModel: (value: string | null) => void }) { return <div><p className="mb-3 text-[10px] font-bold uppercase tracking-wider text-terminal">{title}</p><label className="block text-[10px] uppercase text-dim">Provider<select value={provider} onChange={(event) => onProvider(event.target.value as "codex" | "claude")} className="field mt-2"><option value="codex">Codex</option><option value="claude">Claude</option></select></label><label className="mt-3 block text-[10px] uppercase text-dim">Model override<input value={model ?? ""} onChange={(event) => onModel(event.target.value || null)} placeholder="Provider default" className="field mt-2" /></label></div>; }
+function httpProviderEntries(providers: Record<string, ProviderStatus>): { name: string; status: ProviderStatus }[] {
+  return Object.entries(providers)
+    .filter(([, status]) => status?.kind === "http")
+    .map(([name, status]) => ({ name, status }));
+}
+
+function httpProviderInitial(
+  providers: Record<string, ProviderStatus>,
+  name: string,
+) {
+  const status = providers[name];
+  return {
+    name,
+    format: (status?.format === "anthropic" ? "anthropic" : "openai") as "openai" | "anthropic",
+    base_url: status?.base_url ?? "",
+    model: status?.model ?? "",
+    max_tokens: status?.max_tokens ?? null,
+  };
+}
+
+function ProviderFields({ title, provider, model, options, onProvider, onModel }: { title: string; provider: string; model: string | null; options: ProviderOption[]; onProvider: (value: string) => void; onModel: (value: string | null) => void }) {
+  return (
+    <div>
+      <p className="mb-3 text-[10px] font-bold uppercase tracking-wider text-terminal">{title}</p>
+      <label className="block text-[10px] uppercase text-dim">Provider
+        <ProviderSelect options={options} value={provider} onChange={onProvider} className="field mt-2" />
+      </label>
+      <label className="mt-3 block text-[10px] uppercase text-dim">Model override<input value={model ?? ""} onChange={(event) => onModel(event.target.value || null)} placeholder="Provider default" className="field mt-2" /></label>
+    </div>
+  );
+}
 
 function NumberField({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void }) { return <label className="block text-[10px] uppercase leading-4 text-dim">{label}<input type="number" value={value} min={min} max={max} onChange={(event) => onChange(Number(event.target.value))} className="field mt-2" /></label>; }
 

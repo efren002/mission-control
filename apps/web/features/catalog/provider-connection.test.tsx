@@ -94,6 +94,35 @@ describe("ProviderConnectionCard", () => {
       }),
     );
   });
+
+  it("hides the login button for http providers and shows the encrypted-key hint", () => {
+    cleanup();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("http providers must not poll the login endpoints");
+    });
+
+    render(
+      <ProviderConnectionCard
+        provider="openrouter"
+        status={{
+          kind: "http",
+          authenticated: false,
+          version: "http",
+        }}
+        token="local-token"
+        onAuthenticated={() => undefined}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: /connect/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText((_, element) =>
+        Boolean(element?.textContent?.match(/stored encrypted in providers\.json/i)),
+      ).length,
+    ).toBeGreaterThan(0);
+  });
 });
 
 describe("ProviderConnectionBanner", () => {
@@ -102,35 +131,57 @@ describe("ProviderConnectionBanner", () => {
     vi.restoreAllMocks();
   });
 
-  it("lists disconnected providers and hides when everything is connected", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-      jsonResponse({
-        providers: {
-          codex: { authenticated: true },
-          claude: { authenticated: false },
-        },
-      }),
-    );
+  it("lists disconnected providers that are in use and hides when everything is connected", async () => {
+    // Route by URL: providers (status), settings/workflow (planner), agents (in-use providers).
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const path = String(url);
+      if (path.endsWith("/providers"))
+        return jsonResponse({
+          providers: {
+            codex: { authenticated: true },
+            claude: { authenticated: false },
+            openrouter: { kind: "http", authenticated: true },
+          },
+        });
+      if (path.endsWith("/settings/workflow"))
+        return jsonResponse({ planner_provider: "openrouter" });
+      if (path.endsWith("/agents"))
+        return jsonResponse([{ id: "a1", provider: "claude", enabled: true }]);
+      throw new Error(`unexpected fetch ${path}`);
+    });
 
     render(<ProviderConnectionBanner token="local-token" />);
 
+    // Claude is in use (as an agent provider) and disconnected → warn.
     expect(await screen.findByText(/Claude is not connected/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /connect in settings/i })).toHaveAttribute(
       "href",
       "/settings",
     );
+  });
 
-    cleanup();
-    vi.restoreAllMocks();
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-      jsonResponse({
-        providers: {
-          codex: { authenticated: true },
-          claude: { authenticated: true },
-        },
-      }),
-    );
+  it("does not nag about CLI providers that are not in use", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const path = String(url);
+      if (path.endsWith("/providers"))
+        return jsonResponse({
+          providers: {
+            codex: { authenticated: false },
+            claude: { authenticated: false },
+            openrouter: { kind: "http", authenticated: true },
+          },
+        });
+      if (path.endsWith("/settings/workflow"))
+        return jsonResponse({ planner_provider: "openrouter" });
+      if (path.endsWith("/agents")) return jsonResponse([]);
+      throw new Error(`unexpected fetch ${path}`);
+    });
+
     render(<ProviderConnectionBanner token="local-token" />);
-    await waitFor(() => expect(screen.queryByText(/not connected/)).not.toBeInTheDocument());
+
+    // Neither CLI provider is in use, so the banner stays hidden.
+    await waitFor(() =>
+      expect(screen.queryByText(/not connected/)).not.toBeInTheDocument(),
+    );
   });
 });

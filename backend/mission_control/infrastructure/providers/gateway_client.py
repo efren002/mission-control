@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -227,6 +228,32 @@ class ProviderGatewayClient:
 
     async def login_cancel(self, provider: str) -> tuple[int, dict[str, Any]]:
         return await self._login_request("DELETE", f"/v1/providers/{provider}/login", None)
+
+    async def create_custom_provider(
+        self, entry: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        """Create an HTTP provider in providers.json via the gateway."""
+        return await self._login_request("POST", "/v1/providers/custom", entry)
+
+    async def update_custom_provider(
+        self, name: str, entry: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        """Update an HTTP provider in providers.json via the gateway."""
+        return await self._login_request(
+            "PUT", f"/v1/providers/custom/{quote(name)}", entry
+        )
+
+    async def delete_custom_provider(self, name: str) -> tuple[int, dict[str, Any]]:
+        """Delete an HTTP provider from providers.json via the gateway."""
+        return await self._login_request(
+            "DELETE", f"/v1/providers/custom/{quote(name)}", None
+        )
+
+    async def probe_custom_provider(self, name: str) -> tuple[int, dict[str, Any]]:
+        """Probe a custom provider's /models endpoint to verify connectivity."""
+        return await self._login_request(
+            "GET", f"/v1/providers/custom/{quote(name)}/models", None
+        )
 
     async def _login_request(
         self, method: str, path: str, body: dict[str, Any] | None

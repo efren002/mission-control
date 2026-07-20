@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -20,6 +20,23 @@ LOGIN_PROVIDERS = frozenset({"codex", "claude"})
 
 class LoginCodeRequest(BaseModel):
     code: str = Field(min_length=1, max_length=4096)
+
+
+class CustomProviderInput(BaseModel):
+    """Shape mirrored from the gateway's providers.json validator.
+
+    api_key is the plaintext provider key; the gateway encrypts it at rest and
+    never returns it. Required on create, optional on update (None = keep the
+    existing encrypted key).
+    """
+
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{1,38}$")
+    kind: Literal["http"] = "http"
+    format: Literal["openai", "anthropic"]
+    base_url: str = Field(pattern=r"^https?://\S+$")
+    model: str | None = None
+    api_key: str | None = Field(default=None, min_length=1)
+    max_tokens: int | None = Field(default=None, ge=1)
 
 
 class ProviderPerformanceMetric(BaseModel):
@@ -140,7 +157,7 @@ async def provider_performance(
         .join(Agent, Agent.id == AgentInvocation.agent_id)
         .where(
             AgentInvocation.run_id.is_not(None),
-            AgentInvocation.provider.in_(("codex", "claude")),
+            AgentInvocation.provider.is_not(None),
             AgentInvocation.status.in_(("completed", "failed")),
         )
         .group_by(AgentInvocation.provider, Agent.role)
@@ -161,7 +178,7 @@ async def provider_performance(
             None,
             [row for row in rows if row["provider"] == provider],
         )
-        for provider in ("codex", "claude")
+        for provider in sorted({str(row["provider"]) for row in rows})
     ]
     return ProviderPerformanceResponse(
         generated_at=datetime.now(UTC),
@@ -248,6 +265,59 @@ async def cancel_provider_login(
     _require_login_provider(provider)
     try:
         status_code, payload = await ProviderGatewayClient().login_cancel(provider)
+    except Exception as error:
+        raise _gateway_unavailable(error) from error
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+@router.post("/custom")
+async def create_custom_provider(
+    entry: CustomProviderInput,
+    _: Annotated[str, Depends(require_local_admin)],
+) -> JSONResponse:
+    if not entry.api_key:
+        raise HTTPException(status_code=422, detail="api_key is required when creating a provider")
+    try:
+        status_code, payload = await ProviderGatewayClient().create_custom_provider(
+            entry.model_dump(exclude_none=True)
+        )
+    except Exception as error:
+        raise _gateway_unavailable(error) from error
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+@router.put("/custom/{name}")
+async def update_custom_provider(
+    name: str,
+    entry: CustomProviderInput,
+    _: Annotated[str, Depends(require_local_admin)],
+) -> JSONResponse:
+    try:
+        status_code, payload = await ProviderGatewayClient().update_custom_provider(
+            name, entry.model_dump(exclude_none=True)
+        )
+    except Exception as error:
+        raise _gateway_unavailable(error) from error
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+@router.delete("/custom/{name}")
+async def delete_custom_provider(
+    name: str, _: Annotated[str, Depends(require_local_admin)]
+) -> JSONResponse:
+    try:
+        status_code, payload = await ProviderGatewayClient().delete_custom_provider(name)
+    except Exception as error:
+        raise _gateway_unavailable(error) from error
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+@router.get("/custom/{name}/models")
+async def probe_custom_provider(
+    name: str, _: Annotated[str, Depends(require_local_admin)]
+) -> JSONResponse:
+    try:
+        status_code, payload = await ProviderGatewayClient().probe_custom_provider(name)
     except Exception as error:
         raise _gateway_unavailable(error) from error
     return JSONResponse(status_code=status_code, content=payload)

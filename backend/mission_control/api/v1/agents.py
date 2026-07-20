@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mission_control.application.services.agents import AgentService
+from mission_control.application.services.provider_routing import can_assign_role, provider_kind
 from mission_control.application.services.settings import get_workflow_settings
 from mission_control.core.security import require_local_admin
 from mission_control.infrastructure.database.models import Agent, AgentInvocation, Task
@@ -25,7 +26,11 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 Session = Annotated[AsyncSession, Depends(get_session)]
 Admin = Annotated[str, Depends(require_local_admin)]
 AgentRole = Literal["planner", "developer", "qa", "reviewer"]
-Provider = Literal["codex", "claude"]
+# Provider names are free-form strings: the closed `codex`/`claude` set was
+# widened to allow HTTP providers (openrouter, 9router, anthropic-compatible)
+# declared in the gateway's providers.json. Validity is checked against the
+# live gateway provider map at create/update time.
+Provider = str
 
 
 class AgentCreate(BaseModel):
@@ -93,6 +98,21 @@ async def provider_map() -> dict[str, object]:
         return {}
     providers = payload.get("providers", {})
     return providers if isinstance(providers, dict) else {}
+
+
+async def _assert_role_allowed(
+    provider: str, role: str, providers: dict[str, object]
+) -> None:
+    """HTTP providers return text and cannot mutate the git worktree, so they
+    may not be assigned to the developer role (which checkpoints file edits)."""
+    if not can_assign_role(provider_kind(providers, provider), role):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "HTTP providers cannot serve the developer role because they "
+                "cannot edit the git worktree. Use codex or claude for developer agents."
+            ),
+        )
 
 
 async def agent_counts(
@@ -170,29 +190,37 @@ async def list_agents(_: Admin, session: Session) -> list[AgentResponse]:
 
 @router.post("", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
 async def create_agent(payload: AgentCreate, _: Admin, session: Session) -> AgentResponse:
+    providers = await provider_map()
+    await _assert_role_allowed(payload.provider, payload.role, providers)
     try:
         agent = await AgentService(session).create(**payload.model_dump())
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    return await agent_response(session, agent, await provider_map())
+    return await agent_response(session, agent, providers)
 
 
 @router.put("/{agent_id}", response_model=AgentResponse)
 async def update_agent(
     agent_id: uuid.UUID, payload: AgentUpdate, _: Admin, session: Session
 ) -> AgentResponse:
+    service = AgentService(session)
+    existing = await service.get(agent_id)
+    providers = await provider_map()
+    effective_provider = payload.provider if payload.provider is not None else existing.provider
+    effective_role = payload.role if payload.role is not None else existing.role
+    await _assert_role_allowed(effective_provider, effective_role, providers)
     values = {
         key: value
         for key, value in payload.model_dump(exclude_unset=True).items()
         if value is not None or key == "model"
     }
     try:
-        agent = await AgentService(session).update(agent_id, values)
+        agent = await service.update(agent_id, values)
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    return await agent_response(session, agent, await provider_map())
+    return await agent_response(session, agent, providers)
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)

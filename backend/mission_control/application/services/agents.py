@@ -68,7 +68,7 @@ class AgentService:
                 Agent(
                     name=profile["name"],
                     role=profile["role"],
-                    provider="codex",
+                    provider="claude",
                     model=None,
                     instructions=profile["instructions"],
                     enabled=True,

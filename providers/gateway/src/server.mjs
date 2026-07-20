@@ -29,6 +29,10 @@ import {
   parseProviderUsage,
   recordProviderUsage,
 } from "./usage.mjs";
+import { buildRegistry, httpProviderStatus, HTTP_KIND_NAME } from "./registry.mjs";
+import { probeHttpModels, streamHttpCompletion } from "./http_provider.mjs";
+import { mutateProvider } from "./provider_store.mjs";
+import { decryptKey, isKeyConfigured } from "./crypto.mjs";
 
 const PORT = Number(process.env.PROVIDER_GATEWAY_PORT ?? 8100);
 const TOKEN = process.env.PROVIDER_GATEWAY_TOKEN ?? "";
@@ -70,6 +74,8 @@ const recentProviderUsage = new Map([
 // New files in group-writable repository directories remain editable by the host owner.
 process.umask(0o002);
 
+// CLI probe/auth metadata for the built-in providers. HTTP providers are
+// declared in providers.json and never reach this table.
 const providerCommands = {
   codex: {
     command: "codex",
@@ -84,6 +90,46 @@ const providerCommands = {
     capabilities: ["structured_output", "streaming_events", "repository_editing", "sandbox_control"],
   },
 };
+
+// HTTP providers come from providers.json; a malformed file fails fast at boot
+// so the gateway refuses to start rather than silently dropping a provider.
+// `registry` is rebuilt in place whenever the custom-provider file is mutated
+// through the /v1/providers/custom routes, so callers always see a consistent
+// snapshot.
+const CUSTOM_PROVIDERS_PATH = process.env.CUSTOM_PROVIDERS_PATH || null;
+// Master key for provider API keys encrypted at rest. Required when custom
+// providers are enabled; the gateway refuses to start otherwise so a missing
+// key can never silently downgrade encrypted entries to undecryptable.
+const MASTER_KEY = process.env.PROVIDERS_ENCRYPTION_KEY ?? "";
+if (CUSTOM_PROVIDERS_PATH && !isKeyConfigured(MASTER_KEY)) {
+  throw new Error("PROVIDERS_ENCRYPTION_KEY must be set when CUSTOM_PROVIDERS_PATH is configured");
+}
+let registry = buildRegistry({ customProvidersPath: CUSTOM_PROVIDERS_PATH });
+syncUsageMaps(registry);
+
+function reloadRegistry() {
+  registry = buildRegistry({ customProvidersPath: CUSTOM_PROVIDERS_PATH });
+  syncUsageMaps(registry);
+}
+
+// Seed/drop usage tracking to match the HTTP providers currently in the
+// registry. Existing counters are preserved across a reload so editing one
+// provider does not reset another's stats.
+function syncUsageMaps(next) {
+  const httpNames = new Set();
+  for (const [name, entry] of next) {
+    if (entry.kind !== HTTP_KIND_NAME) continue;
+    httpNames.add(name);
+    if (!providerUsage.has(name)) providerUsage.set(name, initialProviderUsage());
+    if (!recentProviderUsage.has(name)) recentProviderUsage.set(name, []);
+  }
+  for (const name of [...providerUsage.keys()]) {
+    if (!httpNames.has(name) && !providerCommands[name]) {
+      providerUsage.delete(name);
+      recentProviderUsage.delete(name);
+    }
+  }
+}
 
 function json(response, statusCode, payload) {
   const body = JSON.stringify(payload);
@@ -569,6 +615,7 @@ async function providerStatus() {
     const runtimeAuthError = authenticationFailures.get(provider);
     providers[provider] = {
       ...providerCommands[provider],
+      kind: "cli",
       ...version,
       installed: version.available,
       ...authentication,
@@ -586,13 +633,98 @@ async function providerStatus() {
         !runtimeAuthError,
     };
   });
+  for (const [name, entry] of registry) {
+    if (entry.kind !== HTTP_KIND_NAME) continue;
+    const status = httpProviderStatus(entry, MASTER_KEY);
+    providers[name] = {
+      ...status,
+      usage: {
+        ...providerUsage.get(name),
+        recentRequests: recentProviderUsage.get(name),
+      },
+    };
+  }
   return providers;
+}
+
+async function runHttpProvider({ entry, provider, response, prompt, model, timeoutMs, usageLabel }) {
+  const apiKey = decryptKey(entry.encrypted_api_key, MASTER_KEY);
+  const startedAt = Date.now();
+  writeEvent(response, "started", {
+    provider,
+    workspace: null,
+    command: null,
+    startedAt: new Date(startedAt).toISOString(),
+  });
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let parsedUsage = null;
+  let timedOut = false;
+  let exitCode = 0;
+  try {
+    const result = await streamHttpCompletion({
+      entry,
+      apiKey,
+      model,
+      prompt,
+      timeoutMs,
+      onStdout: (chunk) => {
+        stdoutBytes += Buffer.byteLength(chunk);
+        writeEvent(response, "stdout", { data: chunk });
+      },
+      onStderr: (chunk) => {
+        stderrBytes += Buffer.byteLength(chunk);
+        writeEvent(response, "stderr", { data: chunk });
+      },
+    });
+    parsedUsage = result.parsedUsage;
+    exitCode = result.exitCode;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "HTTP provider failed";
+    timedOut = /timed out|abort/i.test(message);
+    exitCode = 1;
+    writeEvent(response, "stderr", { data: message });
+  }
+  providerUsage.set(
+    provider,
+    recordProviderUsage(providerUsage.get(provider), parsedUsage),
+  );
+  recentProviderUsage.set(
+    provider,
+    [
+      {
+        label: usageLabel?.trim() || "Unlabelled request",
+        model: model || entry.model || null,
+        promptChars: prompt.length,
+        inputTokens: parsedUsage?.inputTokens ?? 0,
+        cachedInputTokens: parsedUsage?.cachedInputTokens ?? 0,
+        outputTokens: parsedUsage?.outputTokens ?? 0,
+        totalTokens: parsedUsage?.totalTokens ?? 0,
+        durationMs: Date.now() - startedAt,
+        succeeded: exitCode === 0,
+        completedAt: new Date().toISOString(),
+      },
+      ...(recentProviderUsage.get(provider) ?? []),
+    ].slice(0, MAX_RECENT_USAGE),
+  );
+  if (exitCode === 0) authenticationFailures.delete(provider);
+  writeEvent(response, "completed", {
+    provider,
+    exitCode,
+    signal: null,
+    timedOut,
+    cancelled: false,
+    durationMs: Date.now() - startedAt,
+    stdoutBytes,
+    stderrBytes,
+    usage: parsedUsage,
+  });
 }
 
 async function execute(request, response, body) {
   const provider = body.provider;
   const prompt = body.prompt;
-  if (!Object.hasOwn(providerCommands, provider)) throw new Error("Unsupported provider");
+  if (!registry.has(provider)) throw new Error("Unsupported provider");
   if (typeof prompt !== "string" || prompt.length === 0 || prompt.length > MAX_PROMPT_CHARS) {
     throw new Error("Prompt must be a non-empty string within the size limit");
   }
@@ -612,9 +744,27 @@ async function execute(request, response, body) {
   if (!["read-only", "workspace-write"].includes(accessMode)) {
     throw new Error("Unsupported access mode");
   }
+  const timeoutMs = Math.min(
+    Math.max(Number(body.timeoutMs ?? DEFAULT_TIMEOUT_MS), 1_000),
+    DEFAULT_TIMEOUT_MS,
+  );
+
+  // HTTP providers run in-process: no filesystem, no sandbox supervisor,
+  // no checkpoint. accessMode is ignored — they only produce text.
+  const entry = registry.get(provider);
+  if (entry.kind === HTTP_KIND_NAME) {
+    return runHttpProvider({
+      entry,
+      provider,
+      response,
+      prompt,
+      model: model || null,
+      timeoutMs,
+      usageLabel,
+    });
+  }
 
   const workspace = await resolveSafeWorkspace(body.workspace);
-  const timeoutMs = Math.min(Math.max(Number(body.timeoutMs ?? DEFAULT_TIMEOUT_MS), 1_000), DEFAULT_TIMEOUT_MS);
   const { command, args } = commandFor(provider, workspace, prompt, model || null, accessMode);
   if (SANDBOX_SUPERVISOR_URL) {
     let stdout = "";
@@ -1004,6 +1154,53 @@ const server = createServer(async (request, response) => {
       if (!loginRoute[2] && request.method === "DELETE") {
         const result = cancelLogin(provider);
         return json(response, result.statusCode, result.payload);
+      }
+      return json(response, 404, { detail: "Not found" });
+    }
+    if (request.method === "POST" && request.url === "/v1/providers/custom") {
+      if (!CUSTOM_PROVIDERS_PATH) {
+        return json(response, 503, { detail: "Custom providers are not configured on this gateway" });
+      }
+      const body = await requestBody(request);
+      await mutateProvider({ path: CUSTOM_PROVIDERS_PATH, op: "create", input: body, masterKey: MASTER_KEY });
+      reloadRegistry();
+      return json(response, 200, { providers: await providerStatus() });
+    }
+    const modelsRoute = /^\/v1\/providers\/custom\/([^/]+)\/models$/.exec(request.url ?? "");
+    if (modelsRoute && request.method === "GET") {
+      if (!CUSTOM_PROVIDERS_PATH) {
+        return json(response, 503, { detail: "Custom providers are not configured on this gateway" });
+      }
+      const name = decodeURIComponent(modelsRoute[1]);
+      const entry = registry.get(name);
+      if (!entry || entry.kind !== HTTP_KIND_NAME) {
+        return json(response, 404, { detail: `Provider "${name}" is not an HTTP provider` });
+      }
+      let apiKey;
+      try {
+        apiKey = decryptKey(entry.encrypted_api_key, MASTER_KEY);
+      } catch (error) {
+        return json(response, 200, { ok: false, error: error.message });
+      }
+      const probe = await probeHttpModels({ entry, apiKey });
+      return json(response, 200, probe);
+    }
+    const customRoute = /^\/v1\/providers\/custom\/([^/]+)$/.exec(request.url ?? "");
+    if (customRoute) {
+      if (!CUSTOM_PROVIDERS_PATH) {
+        return json(response, 503, { detail: "Custom providers are not configured on this gateway" });
+      }
+      const name = decodeURIComponent(customRoute[1]);
+      if (request.method === "PUT") {
+        const body = await requestBody(request);
+        await mutateProvider({ path: CUSTOM_PROVIDERS_PATH, op: "update", name, input: body, masterKey: MASTER_KEY });
+        reloadRegistry();
+        return json(response, 200, { providers: await providerStatus() });
+      }
+      if (request.method === "DELETE") {
+        await mutateProvider({ path: CUSTOM_PROVIDERS_PATH, op: "delete", name });
+        reloadRegistry();
+        return json(response, 200, { providers: await providerStatus() });
       }
       return json(response, 404, { detail: "Not found" });
     }
