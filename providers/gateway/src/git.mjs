@@ -230,6 +230,7 @@ export async function gitIntegrateWorktree(
     throw failure(integrated, "Unable to fast-forward the source repository");
   }
   const integrationSha = await repositoryHead(sourceWorkspace);
+  await syncDependencyDirectories(worktree, sourceWorkspace);
 
   const removed = await runGit(sourceWorkspace, ["worktree", "remove", "--force", worktree]);
   if (removed.code !== 0) {
