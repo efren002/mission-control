@@ -4,7 +4,15 @@ Local-first orchestration platform for supervised AI software-development workfl
 
 ## Screenshots
 
+The Dashboard is the system overview: active objectives, agents online, pending approvals, live
+runtime state, per-service health for the API, database, Redis, both gateways and the event stream,
+plus the durable **Provider performance** report comparing Codex and Claude mission outcomes.
+
 ![Dashboard overview](docs/dashboard-page.png)
+
+The Missions screen is the whole guided workflow on one page. Describe the build, optionally attach
+reference images, watch the plan, review, build, and done stages advance, and use the completion
+panel to open the project in VS Code, run its tests, or launch a local preview.
 
 ![Mission screen](docs/mission-page.png)
 
@@ -14,7 +22,10 @@ This repository contains a Next.js dashboard, FastAPI API, Dramatiq workers, Pos
 Redis, migrations, health monitoring, authenticated realtime transport, durable job dispatch,
 an isolated provider gateway for Claude Code and Codex CLI, and a separate credential-free runtime
 gateway for project tests and previews. Approved execution runs can edit registered repositories
-and record Git checkpoint commits through the provider gateway.
+and record Git checkpoint commits through the provider gateway. Every provider invocation and
+project test command runs inside a disposable container created by a token-protected sandbox
+supervisor. Finished projects can be opened in VS Code on the host, run and previewed locally, or
+downloaded as a zip archive.
 
 ## Requirements
 
@@ -52,6 +63,11 @@ to `127.0.0.1` and CORS is restricted to the dashboard origin. Set `AUTO_ADMIN_L
 enter the token manually in the top bar before exposing the service beyond localhost. The
 realtime endpoint authenticates with the same admin token using the WebSocket subprotocol header;
 workflow events are never available to an unauthenticated socket.
+
+The top bar carries two aids for a new install. **Guide** opens a short walkthrough of connecting a
+provider, starting a mission, approving a plan, and verifying or undoing the result; it can be
+reopened at any time. The bell beside it is the notification center, which collects workflow events
+from the realtime stream so an approval or a failure is not missed while another screen is open.
 
 ## Authenticate the provider gateway
 
@@ -97,6 +113,13 @@ The mission is marked complete only when every criterion and every available det
 passes. Failed criteria and their evidence remain on the mission instead of being reported as a
 successful build. Execution failures surface on the same screen with a retry action.
 
+A mission can carry reference images. Use **Attach images** on the new-mission form, or **Add image**
+on an existing mission, to paste from the clipboard, drop files, or pick them from disk. Up to six
+images of at most 5 MB each are kept per mission, and the stored type comes from the file signature
+rather than the browser's declared content type. Planner and developer agents receive the file paths,
+so an error screenshot or a UI reference is read as part of the brief instead of being described in
+prose.
+
 The sections below describe the underlying pieces. The Objectives, Runs, Approvals, and Tasks
 pages remain available under **Advanced** in the sidebar for step-by-step control and detailed
 timelines; nothing about their behavior changed.
@@ -109,9 +132,11 @@ Set `REPOSITORY_HOST_ROOT` in `.env` to the host directory containing the reposi
 docker compose up -d --build
 ```
 
-Open <http://localhost:3000/projects> (the admin session is established automatically in local development) and create a project. Then open <http://localhost:3000/repositories>, choose the project, and register the relative Git repository path.
+Open <http://localhost:3000/projects> (the admin session is established automatically in local development) and create a project. Use this page to record project-specific instructions and to override the test and app commands.
 
 ![Projects page](docs/project-page.png)
+
+Then open <http://localhost:3000/repositories>. This page is optional advanced setup, because **Build project** creates a repository for you when a project has none. It offers two paths: **Create a project repository** initializes a new Git repository under the repository root, and **Register an existing repository** attaches a path relative to that root (for example, `my-app`). Each registered repository lists its host path with a copy button, and carries actions to open it in VS Code, download it as a zip, rename it or change its default branch, and unregister it.
 
 ![Repositories page](docs/repository-page.png)
 
@@ -168,7 +193,9 @@ assignment, task limits, provider timeout, output retention, repository-write au
 and global coding standards. Each assigned agent profile controls the provider and model used
 for its execution tasks. Administrative and gateway tokens remain environment-managed secrets.
 Provider sign-in is available from **Settings**; the resulting credentials live in the gateway's
-Docker volumes and are intentionally never stored through the dashboard.
+Docker volumes and are intentionally never stored through the dashboard. The **Disposable execution
+containers** panel reports sandbox supervisor health, the number of active containers, and the
+memory, CPU, and process limits applied to every sandbox.
 
 ![Settings page](docs/settings-page.png)
 
@@ -295,6 +322,11 @@ maintenance checks and the findings they produce. Continuous operations is **off
 is enabled in **Settings → Continuous operations**; until then, schedules never run on their own,
 though you can still trigger any one with **Run**.
 
+![Operations page](docs/operations-page.png)
+
+The screen shows how many findings await review, how many schedules are enabled, and whether
+continuous operations is currently allowed to run unattended.
+
 A schedule binds a check to a project on a fixed cadence. The available checks are failing-test
 diagnosis, dependency maintenance, security checks (`npm audit` and committed-secret scanning),
 repository health (missing `.gitignore`, large tracked files), documentation drift, GitHub issue
@@ -315,11 +347,39 @@ platform, so no new infrastructure is required. Detector executions and their re
 for observability, and any provider reasoning (diagnosis, repair proposals, triage) is attributed
 as agent invocations in the usual usage analytics.
 
-## Run project tests and preview the app
+## Open, run, and download the built project
 
-After a mission has built a repository, its completion panel includes **Run tests** and
-**Run app**. Test runs are queued on the worker, executed inside the credential-free runtime
-gateway against
+After a mission has built a repository, its completion panel includes **Open in VS Code**,
+**Run tests**, and **Run app**.
+
+### Open the project in VS Code
+
+**Open in VS Code** appears on the mission completion panel and on every entry of the Repositories
+page. It opens the repository's real path on your machine using the `vscode://file/...` protocol
+handler, so the editor loads the working tree directly rather than a copy. It needs VS Code
+installed on the host and the browser allowed to hand the link to it; the first click usually asks
+for that permission once.
+
+The button is shown only when Mission Control can resolve a host path for the repository. That
+mapping comes from `REPOSITORY_HOST_ROOT` (absolute, or relative to `MISSION_CONTROL_HOST_ROOT`,
+which Compose sets to the directory you start the stack from). The default `./repositories` works
+without any change. If the value is missing or the repository resolves outside the configured root,
+the action is hidden instead of producing a broken link, and the Repositories page still shows the
+container path so you can copy it.
+
+### Download the project
+
+The download action on the Repositories page returns a zip of the repository as committed at `HEAD`,
+named `<repository>-<short-sha>.zip`. It is produced with `git archive`, so untracked and ignored
+files, along with the `.git` directory itself, are excluded; what you get is the committed state,
+not the working tree. The same archive is available from
+`GET /api/v1/repositories/{repository_id}/archive` with the admin token. Because Mission Control
+saves a Git checkpoint after every completed task, the repository on disk stays the full history,
+and normal Git tooling remains the way to move a project somewhere else.
+
+### Run tests and preview the app
+
+Test runs are queued on the worker, executed inside the credential-free runtime gateway against
 the writable repository mount, and shown on the mission as a live rolling output excerpt. A
 nonzero exit code is recorded as a failed test run without changing the mission or build status.
 The runtime service starts in `runtime-only` mode, where provider execution, login, and Git
@@ -377,9 +437,12 @@ database/provider `control-plane`. Egress permission applies to every runtime te
 while that Compose configuration is active. Stop the stack with `make down` before switching modes;
 return to default-deny mode with `make down` followed by `make up`.
 
-The runtime gateway is still a long-lived container rather than a fresh container per command.
-Per-run containers and per-mission network policies remain future hardening. Adjust the resource
-values in `compose.yaml` when a trusted project legitimately needs more capacity.
+Both gateways run with `SANDBOX_REQUIRED`, so provider invocations and test commands are refused
+rather than falling back to in-gateway execution when the sandbox supervisor is unavailable. The
+gateways themselves remain long-lived containers, and preview processes still run inside the runtime
+gateway so their localhost port stays reachable. Per-mission network policies remain future
+hardening. Adjust the resource values in `compose.yaml` when a trusted project legitimately needs
+more capacity.
 
 ## Upgrade an existing checkout
 
@@ -466,6 +529,11 @@ Completion metadata reports timeout and client-disconnect cancellation separatel
 - Continuous operations is off by default and strictly propose-only: scheduled maintenance checks
   create findings that require explicit approval before any objective is planned or executed.
 - Git checkpoints make completed and failed task changes attributable and reversible.
+- Repository archives and host-path resolution are read-only and confined to the configured
+  repository root. Opening a project in VS Code is a client-side protocol link; the API never
+  launches an editor.
+- Mission image attachments are validated by file signature rather than the declared content type,
+  and are capped per mission in count and size.
 
 ## Common commands
 

@@ -2,6 +2,7 @@
 
 import {
   CheckCircle2,
+  Code2,
   Compass,
   Eye,
   Plug,
@@ -36,7 +37,7 @@ const tourSteps = [
   {
     icon: Rocket,
     title: "Start a mission",
-    body: "Missions is the one-screen guided workflow. Describe what you want to build and press Start mission. A project is created automatically and the planner drafts tasks for your review.",
+    body: "Missions is the one-screen guided workflow. Describe what you want to build and press Start mission. A project is created automatically and the planner drafts tasks for your review. Attach screenshots or UI references and the agents read them as part of the brief.",
     link: { label: "Open Missions", href: "/missions" },
   },
   {
@@ -52,9 +53,15 @@ const tourSteps = [
     link: null,
   },
   {
+    icon: Code2,
+    title: "Take the project with you",
+    body: "The finished project is a normal Git repository on your machine. Open in VS Code loads it in your editor, and Repositories can download it as a zip of the committed files.",
+    link: { label: "Open Repositories", href: "/repositories" },
+  },
+  {
     icon: Compass,
     title: "Explore at your own pace",
-    body: "The Dashboard tracks your setup checklist, and the Advanced sidebar section (Objectives, Runs, Approvals, Tasks) gives step-by-step control. Reopen this guide anytime from the Guide button in the top bar.",
+    body: "The Dashboard tracks your setup checklist, Operations proposes recurring maintenance work for your approval, and the Advanced sidebar section (Objectives, Runs, Approvals, Tasks) gives step-by-step control. Reopen this guide anytime from the Guide button in the top bar.",
     link: null,
   },
 ] as const;

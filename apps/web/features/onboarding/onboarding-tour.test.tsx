@@ -30,8 +30,10 @@ describe("OnboardingTour", () => {
   it("ends on a call to action that opens Missions", () => {
     render(<OnboardingTour />);
 
-    for (let i = 0; i < 5; i += 1) {
-      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    let next = screen.queryByRole("button", { name: "Next" });
+    while (next) {
+      fireEvent.click(next);
+      next = screen.queryByRole("button", { name: "Next" });
     }
 
     const finish = screen.getByRole("link", { name: "Start building" });
