@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { cp, mkdir } from "node:fs/promises";
 
 const GIT_TIMEOUT_MS = 30_000;
 const MAX_MESSAGE_CHARS = 500;
@@ -21,6 +21,29 @@ const commitIdentity = [
   "-c",
   "user.email=agents@mission-control.local",
 ];
+
+// Installed-dependency directories, and any generated .env, are
+// conventionally gitignored, so neither a fresh `git worktree add` nor a
+// merge-based integration ever carries them across worktree boundaries.
+// Copying straight from the filesystem (only when the target's manifest
+// exists and it has nothing there yet) keeps tests runnable without
+// re-installing packages or losing a bootstrap task's generated .env inside
+// a network-isolated sandbox.
+const DEPENDENCY_DIRECTORIES = [
+  { manifest: "composer.json", directory: "vendor" },
+  { manifest: "package.json", directory: "node_modules" },
+  { manifest: ".env.example", directory: ".env" },
+];
+
+async function syncDependencyDirectories(sourceDir, targetDir) {
+  for (const { manifest, directory } of DEPENDENCY_DIRECTORIES) {
+    if (!existsSync(resolve(targetDir, manifest))) continue;
+    const sourcePath = resolve(sourceDir, directory);
+    const targetPath = resolve(targetDir, directory);
+    if (!existsSync(sourcePath) || existsSync(targetPath)) continue;
+    await cp(sourcePath, targetPath, { recursive: true });
+  }
+}
 
 function runGit(workspace, args) {
   return new Promise((resolveRun) => {
@@ -135,6 +158,7 @@ async function createLinkedWorktree(sourceWorkspace, branch, worktree, root) {
       : ["worktree", "add", "-b", branch, worktree, "HEAD"];
   const created = await runGit(sourceWorkspace, args);
   if (created.code !== 0) throw failure(created, "Unable to create the isolated worktree");
+  await syncDependencyDirectories(sourceWorkspace, worktree);
   return {
     worktree,
     branch,
@@ -304,6 +328,7 @@ export async function gitIntegrateTaskWorktree(
     }
   }
   const integrationSha = await repositoryHead(sourceWorkspace);
+  await syncDependencyDirectories(worktree, sourceWorkspace);
   const removed = await runGit(sourceWorkspace, ["worktree", "remove", "--force", worktree]);
   if (removed.code !== 0) {
     return {

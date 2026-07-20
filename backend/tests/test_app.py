@@ -824,6 +824,65 @@ def test_queue_redelivery_failure_is_reported(
     session.commit.assert_awaited()
 
 
+def test_retry_verification_resumes_the_run_without_rebuilding_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = Run(
+        id=uuid.uuid4(),
+        objective_id=uuid.uuid4(),
+        status="failed",
+        current_step="verification_failed",
+        worktree_status="preserved",
+    )
+    objective = Objective(
+        id=run.objective_id,
+        project_id=uuid.uuid4(),
+        title="Schedule app reminder",
+        status="failed",
+    )
+    session = AsyncMock()
+    session.scalar.side_effect = [run]
+    session.get.side_effect = [objective]
+
+    async def enabled_settings(_: object) -> dict[str, object]:
+        return {"allow_repository_writes": True}
+
+    async def no_event(*_: object, **__: object) -> None:
+        return None
+
+    send = MagicMock()
+    monkeypatch.setattr(runs, "get_workflow_settings", enabled_settings)
+    monkeypatch.setattr(runs, "append_run_event", no_event)
+    monkeypatch.setattr(
+        "mission_control.workers.actors.executor.execute_run.send", send
+    )
+
+    response = asyncio.run(runs.retry_verification(run.id, "admin", session))
+
+    assert response.status == "executing"
+    assert run.status == "executing"
+    assert run.current_step == "execution_resuming"
+    assert run.worktree_status == "active"
+    assert objective.status == "executing"
+    send.assert_called_once_with(str(run.id))
+
+
+def test_retry_verification_rejects_a_run_that_did_not_fail_verification() -> None:
+    run = Run(
+        id=uuid.uuid4(),
+        objective_id=uuid.uuid4(),
+        status="failed",
+        current_step="execution_failed",
+    )
+    session = AsyncMock()
+    session.scalar.side_effect = [run]
+
+    with pytest.raises(HTTPException, match="verification") as error:
+        asyncio.run(runs.retry_verification(run.id, "admin", session))
+
+    assert error.value.status_code == 409
+
+
 def test_resumed_execution_skips_completed_tasks() -> None:
     completed = Task(
         objective_id=uuid.uuid4(),
@@ -1027,6 +1086,103 @@ def test_only_completed_or_failed_tasks_can_be_reverted() -> None:
 
     with pytest.raises(HTTPException, match="completed or failed") as error:
         asyncio.run(tasks_api.revert_task(task.id, "admin", session))
+
+    assert error.value.status_code == 409
+
+
+def test_retry_task_resumes_the_run_without_replanning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = Run(
+        id=uuid.uuid4(),
+        objective_id=uuid.uuid4(),
+        status="failed",
+        current_step="execution_failed",
+        worktree_status="preserved",
+    )
+    objective = Objective(
+        id=run.objective_id,
+        project_id=uuid.uuid4(),
+        title="Flaky mission",
+        status="failed",
+    )
+    task = Task(
+        id=uuid.uuid4(),
+        objective_id=objective.id,
+        run_id=run.id,
+        position=1,
+        depends_on_positions=[],
+        title="Broken step",
+        status="failed",
+        agent_role="developer",
+        worktree_status="preserved",
+        conflict_files=[],
+    )
+    blocked = Task(
+        id=uuid.uuid4(),
+        objective_id=objective.id,
+        run_id=run.id,
+        position=2,
+        depends_on_positions=[1],
+        title="Dependent task",
+        status="blocked",
+        worktree_status="preserved",
+    )
+    session = AsyncMock()
+    session.scalar.side_effect = [task]
+    session.get.side_effect = [run, objective]
+    session.scalars.return_value = [blocked]
+
+    async def enabled_settings(_: object) -> dict[str, object]:
+        return {"allow_repository_writes": True}
+
+    async def no_event(*_: object, **__: object) -> None:
+        return None
+
+    send = MagicMock()
+    monkeypatch.setattr(tasks_api, "get_workflow_settings", enabled_settings)
+    monkeypatch.setattr(tasks_api, "append_run_event", no_event)
+    monkeypatch.setattr(
+        "mission_control.workers.actors.executor.execute_run.send", send
+    )
+
+    response = asyncio.run(tasks_api.retry_task(task.id, "admin", session))
+
+    assert response.status == "planned"
+    assert task.worktree_status == "active"
+    assert blocked.status == "planned"
+    assert blocked.worktree_status == "active"
+    assert run.status == "queued_for_execution"
+    assert run.current_step == "execution_resuming"
+    assert run.worktree_status == "active"
+    assert objective.status == "executing"
+    send.assert_called_once_with(str(run.id))
+
+
+def test_retry_task_rejects_a_task_with_an_unresolved_merge_conflict() -> None:
+    run = Run(
+        id=uuid.uuid4(),
+        objective_id=uuid.uuid4(),
+        status="failed",
+        current_step="task_integration_failed",
+    )
+    task = Task(
+        id=uuid.uuid4(),
+        objective_id=run.objective_id,
+        run_id=run.id,
+        position=1,
+        depends_on_positions=[],
+        title="Conflicting task",
+        status="failed",
+        agent_role="developer",
+        conflict_files=["shared.txt"],
+    )
+    session = AsyncMock()
+    session.scalar.side_effect = [task]
+    session.get.side_effect = [run]
+
+    with pytest.raises(HTTPException, match="not eligible") as error:
+        asyncio.run(tasks_api.retry_task(task.id, "admin", session))
 
     assert error.value.status_code == 409
 

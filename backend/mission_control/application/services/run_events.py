@@ -22,6 +22,7 @@ async def append_run_event(
     *,
     publish: bool = True,
 ) -> RunEvent:
+    await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(str(run_id)))))
     next_sequence = (
         await session.scalar(
             select(func.coalesce(func.max(RunEvent.sequence), 0)).where(

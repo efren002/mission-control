@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Hammer, Loader2, Pencil, Play, Rocket, Search, Trash2, Undo2 } from "lucide-react";
+import { Hammer, Loader2, Pencil, Play, RotateCw, Rocket, Search, Trash2, Undo2 } from "lucide-react";
 
 import { ModulePlaceholder } from "@/components/layout/module-placeholder";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -572,6 +572,10 @@ export function MissionDetail({
   const canPlan =
     ["draft", "failed", "rejected"].includes(objective.status) &&
     pendingApproval?.kind !== "task_integration";
+  const canRetryTask =
+    detail?.status === "failed" && detail.current_step === "execution_failed";
+  const canRetryVerification =
+    detail?.status === "failed" && detail.current_step === "verification_failed";
   const lastError =
     [...(detail?.invocations ?? [])].reverse().find((item) => item.error)?.error ?? null;
   const selectedRepository =
@@ -635,6 +639,33 @@ export function MissionDetail({
       await reload();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to save the mission");
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const retryVerification = async () => {
+    if (!detail) return;
+    setActionBusy(true);
+    try {
+      await catalogApi.retryVerification(token, detail.id);
+      setError("");
+      await reload();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to retry verification");
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const retryTask = async (taskId: string) => {
+    setActionBusy(true);
+    try {
+      await catalogApi.retryTask(token, taskId);
+      setError("");
+      await reload();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to retry the task");
     } finally {
       setActionBusy(false);
     }
@@ -742,6 +773,27 @@ export function MissionDetail({
 
       <MissionAttachments token={token} objectiveId={objective.id} />
 
+      {canRetryVerification && detail && (
+        <section className="mt-6 border border-signal/30 bg-signal/[0.03] p-4">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-signal">
+            Retry verification
+          </p>
+          <p className="mt-2 text-[10px] leading-4 text-dim">
+            Every task already completed successfully; only the deterministic tests and reviewer
+            step failed. This re-runs just that step against the existing build — no tasks are
+            redone, so it costs far less than replanning.
+          </p>
+          <button
+            disabled={actionBusy}
+            onClick={() => void retryVerification()}
+            className="mt-3 inline-flex items-center gap-2 bg-signal px-4 py-2 text-[10px] font-bold uppercase text-black disabled:opacity-40"
+          >
+            <RotateCw className="h-3 w-3" />{" "}
+            {actionBusy ? "Retrying verification" : "Retry verification"}
+          </button>
+        </section>
+      )}
+
       {canPlan && (
         <section className="mt-6 border border-signal/30 bg-signal/[0.03] p-4">
           <p className="text-[10px] font-bold uppercase tracking-wider text-signal">
@@ -749,6 +801,20 @@ export function MissionDetail({
           </p>
           {lastError && objective.status !== "draft" && (
             <p className="mt-2 break-words text-[10px] leading-4 text-orange-300">{lastError}</p>
+          )}
+          {canRetryTask && (
+            <p className="mt-2 text-[10px] leading-4 text-orange-200">
+              This mission failed while building, not while planning. Replanning regenerates every
+              task and discards completed work — to retry only the task that failed, use{" "}
+              <span className="font-bold">Retry task</span> below instead.
+            </p>
+          )}
+          {canRetryVerification && (
+            <p className="mt-2 text-[10px] leading-4 text-orange-200">
+              Every task already completed; only verification failed. Replanning discards that
+              completed work — use <span className="font-bold">Retry verification</span> above
+              instead unless the plan itself needs to change.
+            </p>
           )}
           <button
             disabled={busy}
@@ -1006,6 +1072,18 @@ export function MissionDetail({
                 )}
                 {task.conflict_files.length > 0 && (
                   <TaskConflictReview token={token} taskId={task.id} />
+                )}
+                {canRetryTask &&
+                  task.status === "failed" &&
+                  task.conflict_files.length === 0 && (
+                  <button
+                    disabled={actionBusy}
+                    onClick={() => void retryTask(task.id)}
+                    className="mt-2 mr-4 inline-flex items-center gap-1 bg-signal px-3 py-1.5 text-[9px] font-bold uppercase tracking-wider text-black disabled:opacity-40"
+                  >
+                    <RotateCw className="h-3 w-3" />{" "}
+                    {actionBusy ? "Retrying task" : "Retry task"}
+                  </button>
                 )}
                 {task.worktree_status === "cleanup_pending" && (
                   <p className="mt-1 text-[10px] text-orange-300">

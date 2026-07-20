@@ -16,6 +16,7 @@ from mission_control.core.security import require_local_admin
 from mission_control.infrastructure.database.models import (
     Agent,
     ConflictResolutionAttempt,
+    Objective,
     Repository,
     Run,
     Task,
@@ -305,6 +306,75 @@ async def resolve_task_conflict(
         await session.commit()
         raise HTTPException(status_code=503, detail=attempt.error) from error
     return _resolution_response(attempt, agent)
+
+
+@router.post("/{task_id}/retry", response_model=TaskResponse, status_code=202)
+async def retry_task(
+    task_id: uuid.UUID,
+    _: Annotated[str, Depends(require_local_admin)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TaskResponse:
+    task = await session.scalar(
+        select(Task).where(Task.id == task_id).with_for_update()
+    )
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    run = await session.get(Run, task.run_id) if task.run_id else None
+    if (
+        run is None
+        or run.status != "failed"
+        or run.current_step != "execution_failed"
+        or task.status != "failed"
+        or task.conflict_files
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="This task is not eligible for a retry",
+        )
+    objective = await session.get(Objective, run.objective_id)
+    if objective is None:
+        raise HTTPException(status_code=404, detail="Objective not found")
+    workflow = await get_workflow_settings(session)
+    if not workflow["allow_repository_writes"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Repository writes are disabled in workflow settings",
+        )
+    task.status = "planned"
+    if task.worktree_status == "preserved":
+        task.worktree_status = "active"
+    blocked_tasks = list(
+        await session.scalars(
+            select(Task).where(Task.run_id == run.id, Task.status == "blocked")
+        )
+    )
+    for blocked_task in blocked_tasks:
+        blocked_task.status = "planned"
+        if blocked_task.worktree_status == "preserved":
+            blocked_task.worktree_status = "active"
+    if run.worktree_status == "preserved":
+        run.worktree_status = "active"
+    run.status = "queued_for_execution"
+    run.current_step = "execution_resuming"
+    objective.status = "executing"
+    await append_run_event(
+        session,
+        run.id,
+        "task.retry_queued",
+        {"task_id": str(task.id)},
+    )
+    await session.commit()
+    await session.refresh(task)
+    try:
+        from mission_control.workers.actors.executor import execute_run
+
+        execute_run.send(str(run.id))
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Retry was saved but the worker could not be queued: {error}",
+        ) from error
+    return TaskResponse.model_validate(task)
 
 
 @router.get("/{task_id}/diff", response_model=TaskDiffResponse)

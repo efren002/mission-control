@@ -68,7 +68,7 @@ export function ProviderConnectionCard({ provider, status, token, onAuthenticate
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [probe, setProbe] = useState<{ ok: boolean; models?: string[]; error?: string } | null>(null);
+  const [probe, setProbe] = useState<{ ok: boolean; url?: string; models?: string[]; error?: string } | null>(null);
   const [probing, setProbing] = useState(false);
   const notifiedRef = useRef(false);
 

@@ -7,7 +7,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mission_control.application.services.catalog import CatalogService
@@ -641,4 +641,63 @@ async def resume_execution(
         status=run.status,
         current_step=run.current_step,
         recovered_tasks=len(unfinished_tasks),
+    )
+
+
+@router.post(
+    "/{run_id}/retry-verification",
+    response_model=ResumeExecutionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_verification(
+    run_id: uuid.UUID,
+    _: Admin,
+    session: Session,
+) -> ResumeExecutionResponse:
+    run = await session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status != "failed" or run.current_step != "verification_failed":
+        raise HTTPException(
+            status_code=409,
+            detail="Only a run that failed during verification can retry verification",
+        )
+    objective = await session.get(Objective, run.objective_id)
+    if objective is None:
+        raise HTTPException(status_code=404, detail="Objective not found")
+    workflow = await get_workflow_settings(session)
+    if not workflow["allow_repository_writes"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Repository writes are disabled in workflow settings",
+        )
+    await session.execute(
+        delete(VerificationEvidence).where(VerificationEvidence.run_id == run.id)
+    )
+    if run.worktree_status == "preserved":
+        run.worktree_status = "active"
+    run.status = "executing"
+    run.current_step = "execution_resuming"
+    objective.status = "executing"
+    await append_run_event(
+        session,
+        run.id,
+        "verification.retried",
+        {"reason": "Operator requeued verification without rebuilding tasks"},
+    )
+    await session.commit()
+    try:
+        from mission_control.workers.actors.executor import execute_run
+
+        execute_run.send(str(run.id))
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Retry was saved but the worker could not be queued: {error}",
+        ) from error
+    return ResumeExecutionResponse(
+        id=run.id,
+        status=run.status,
+        current_step=run.current_step,
+        recovered_tasks=0,
     )
