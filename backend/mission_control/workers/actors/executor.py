@@ -895,6 +895,17 @@ async def _verify_run(run_id: uuid.UUID) -> None:
             run.current_step = "verification_failed"
             objective.status = "failed"
             _preserve_worktree(run)
+            if provider_result is not None and provider_result.rate_limited:
+                await append_run_event(
+                    session,
+                    run.id,
+                    "provider.rate_limited",
+                    {
+                        "purpose": "acceptance_verification",
+                        "provider": route.provider,
+                        "detail": failure or "Verification failed",
+                    },
+                )
             await append_run_event(
                 session,
                 run.id,
@@ -1063,6 +1074,9 @@ async def _fail_run(
     failed_task: Task,
     detail: str,
     checkpoint_sha: str | None = None,
+    *,
+    rate_limited: bool = False,
+    rate_limit_provider: str | None = None,
 ) -> None:
     async with async_session_factory() as session:
         stored_run = await session.get(Run, run.id)
@@ -1101,6 +1115,18 @@ async def _fail_run(
         stored_run.current_step = "execution_failed"
         _preserve_worktree(stored_run)
         stored_objective.status = "failed"
+        if rate_limited:
+            await append_run_event(
+                session,
+                stored_run.id,
+                "provider.rate_limited",
+                {
+                    "purpose": "task_execution",
+                    "task_id": str(stored_task.id),
+                    "provider": rate_limit_provider,
+                    "detail": detail[:2000],
+                },
+            )
         await append_run_event(
             session,
             stored_run.id,
@@ -1749,7 +1775,13 @@ async def _execute(run_id: uuid.UUID) -> None:
                 failed_task = await session.get(Task, task_id)
             if failed_run and failed_objective and failed_task:
                 await _fail_run(
-                    failed_run, failed_objective, failed_task, failure, failure_sha
+                    failed_run,
+                    failed_objective,
+                    failed_task,
+                    failure,
+                    failure_sha,
+                    rate_limited=bool(provider_result and provider_result.rate_limited),
+                    rate_limit_provider=agent_provider,
                 )
             return
 

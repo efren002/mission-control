@@ -87,6 +87,9 @@ export function safeExecution(body) {
     if (body.args.join("").length > 150_000) {
       throw new Error("Sandbox provider arguments exceed the size limit");
     }
+    if (!["read-only", "workspace-write"].includes(body.accessMode)) {
+      throw new Error("Sandbox provider access mode is invalid");
+    }
     return {
       kind,
       sandboxId,
@@ -94,6 +97,7 @@ export function safeExecution(body) {
       timeoutMs,
       command: body.provider,
       args: body.args,
+      accessMode: body.accessMode,
       credentials: true,
     };
   }
@@ -114,12 +118,16 @@ export function safeExecution(body) {
 function mountArgs(execution) {
   const args = [
     "--mount",
-    `type=volume,source=${RUNTIME_VOLUME},target=/workspaces`,
+    `type=volume,source=${RUNTIME_VOLUME},target=/workspaces${
+      execution.accessMode === "read-only" ? ",readonly" : ""
+    }`,
   ];
   if (REPOSITORY_ROOT) {
     args.push(
       "--mount",
-      `type=bind,source=${REPOSITORY_ROOT},target=/workspaces/repositories`,
+      `type=bind,source=${REPOSITORY_ROOT},target=/workspaces/repositories${
+        execution.accessMode === "read-only" ? ",readonly" : ""
+      }`,
     );
   }
   if (execution.credentials && ATTACHMENT_ROOT) {

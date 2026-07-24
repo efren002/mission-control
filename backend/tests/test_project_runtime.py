@@ -47,6 +47,20 @@ def test_detects_laravel_commands(tmp_path: Path) -> None:
     assert detected.app_command == "php artisan serve --host 0.0.0.0 --port $PORT"
 
 
+def test_detects_both_laravel_and_node_tests(tmp_path: Path) -> None:
+    (tmp_path / "artisan").touch()
+    (tmp_path / "composer.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"test":"vitest --run"}}',
+        encoding="utf-8",
+    )
+
+    detected = detect_commands(tmp_path)
+
+    assert detected.test_command == "php artisan test && npm test"
+    assert detected.app_command == "php artisan serve --host 0.0.0.0 --port $PORT"
+
+
 def test_project_runtime_defaults_to_the_credential_free_gateway() -> None:
     service = ProjectRuntimeService(AsyncMock())
 

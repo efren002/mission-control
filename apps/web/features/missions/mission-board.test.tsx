@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { catalogApi, type Objective, type RunDetail } from "@/features/catalog/api";
 import { AdminTokenProvider } from "@/features/auth/use-admin-token";
 
-import { MissionBoard, MissionDetail } from "./mission-board";
+import { MissionBoard, MissionDetail, missionLoadIsCurrent } from "./mission-board";
 
 describe("MissionBoard", () => {
   afterEach(() => {
@@ -12,6 +12,32 @@ describe("MissionBoard", () => {
     vi.restoreAllMocks();
   });
   beforeEach(() => sessionStorage.clear());
+
+  it("rejects stale or mismatched mission detail responses", () => {
+    const detail = { objective_id: "objective-a" } as RunDetail;
+
+    expect(missionLoadIsCurrent({
+      sequence: 1,
+      currentSequence: 2,
+      requestedId: "objective-a",
+      resolvedId: "objective-a",
+      detail,
+    })).toBe(false);
+    expect(missionLoadIsCurrent({
+      sequence: 2,
+      currentSequence: 2,
+      requestedId: "objective-b",
+      resolvedId: "objective-b",
+      detail,
+    })).toBe(false);
+    expect(missionLoadIsCurrent({
+      sequence: 2,
+      currentSequence: 2,
+      requestedId: "objective-a",
+      resolvedId: "objective-a",
+      detail,
+    })).toBe(true);
+  });
 
   it("locks the board until an admin session exists", () => {
     render(<MissionBoard />, { wrapper: AdminTokenProvider });
@@ -213,6 +239,84 @@ describe("MissionBoard", () => {
     expect(screen.getByText("npm test")).toBeInTheDocument();
     expect(screen.getByText(/passed · exit 0/i)).toBeInTheDocument();
     expect(screen.getByText(/tests\/test_endpoint\.py passed/)).toBeInTheDocument();
+  });
+
+  it("shows actionable failure guidance and hides raw diagnostics by default", () => {
+    const now = "2026-07-24T13:56:21Z";
+    const objective: Objective = {
+      id: "objective-failed",
+      project_id: "project-1",
+      title: "Interrupted build",
+      description: null,
+      status: "failed",
+    };
+    const detail: RunDetail = {
+      id: "run-failed",
+      objective_id: objective.id,
+      project_id: objective.project_id,
+      objective_title: objective.title,
+      repository_id: "repository-1",
+      status: "failed",
+      current_step: "execution_failed",
+      worktree_branch: "mission-control/run-failed",
+      worktree_status: "preserved",
+      baseline_sha: null,
+      integration_sha: null,
+      task_count: 1,
+      approval_status: null,
+      created_at: now,
+      updated_at: now,
+      tasks: [],
+      events: [],
+      approvals: [],
+      verification_criteria: [],
+      verification_evidence: [],
+      failure_category: "provider_connection",
+      failure_message:
+        "The provider connection was interrupted. Check gateway health, then retry the failed task; completed task checkpoints are preserved.",
+      failure_retryable: true,
+      invocations: [{
+        id: "invocation-failed",
+        agent_id: "agent-1",
+        agent_name: "Implementation Agent",
+        purpose: "task_execution",
+        status: "failed",
+        provider: "codex",
+        model: null,
+        attempt: 1,
+        fallback_from_provider: null,
+        routing_reason: "agent_preference",
+        duration_ms: 100,
+        input_tokens: null,
+        cached_input_tokens: null,
+        output_tokens: null,
+        total_tokens: null,
+        input_excerpt: null,
+        output_excerpt: null,
+        error: "peer closed connection (incomplete chunked read)",
+        created_at: now,
+        updated_at: now,
+      }],
+    };
+
+    render(
+      <MissionDetail
+        objective={objective}
+        detail={detail}
+        repositories={[]}
+        projectName="Project"
+        token="local-token"
+        busy={false}
+        onPlan={() => undefined}
+        onDelete={() => undefined}
+        reload={async () => undefined}
+      />,
+    );
+
+    expect(screen.getByText(/provider connection was interrupted/i)).toBeInTheDocument();
+    const diagnostic = screen.getByText("Technical diagnostic").closest("details");
+    expect(diagnostic).not.toHaveAttribute("open");
+    expect(screen.getAllByText(/peer closed connection/i)).toHaveLength(1);
   });
 
   it("queues a selected agent to resolve a preserved task conflict", async () => {

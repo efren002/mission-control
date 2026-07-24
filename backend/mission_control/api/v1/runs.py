@@ -11,6 +11,10 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mission_control.application.services.catalog import CatalogService
+from mission_control.application.services.failure_reporting import (
+    classify_failure,
+    compact_diagnostic,
+)
 from mission_control.application.services.run_events import append_run_event
 from mission_control.application.services.settings import get_workflow_settings
 from mission_control.core.security import require_local_admin
@@ -152,6 +156,9 @@ class RunDetail(RunSummary):
     approvals: list[RunApprovalResponse]
     verification_criteria: list[VerificationCriterionResponse]
     verification_evidence: list[VerificationEvidenceResponse]
+    failure_category: str | None = None
+    failure_message: str | None = None
+    failure_retryable: bool = False
 
 
 class ExecutionRequest(BaseModel):
@@ -163,6 +170,13 @@ class ResumeExecutionResponse(BaseModel):
     status: str
     current_step: str | None
     recovered_tasks: int
+
+
+def _bounded_event_payload(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        key: compact_diagnostic(value) if isinstance(value, str) else value
+        for key, value in payload.items()
+    }
 
 
 async def _summaries(
@@ -300,6 +314,16 @@ async def get_run(run_id: uuid.UUID, _: Admin, session: Session) -> RunDetail:
             .order_by(AgentInvocation.created_at)
         )
     ).all()
+    rate_limited = any(item.event_type == "provider.rate_limited" for item in events)
+    latest_error = next(
+        (item.error for item, _ in reversed(invocation_rows) if item.error),
+        None,
+    )
+    failure = classify_failure(
+        latest_error,
+        current_step=run.current_step,
+        rate_limited=rate_limited,
+    )
     invocations = [
         RunInvocationResponse(
             id=item.id,
@@ -317,9 +341,9 @@ async def get_run(run_id: uuid.UUID, _: Admin, session: Session) -> RunDetail:
             cached_input_tokens=item.cached_input_tokens,
             output_tokens=item.output_tokens,
             total_tokens=item.total_tokens,
-            input_excerpt=item.input_excerpt,
-            output_excerpt=item.output_excerpt,
-            error=item.error,
+            input_excerpt=compact_diagnostic(item.input_excerpt, limit=4_000),
+            output_excerpt=compact_diagnostic(item.output_excerpt, limit=8_000),
+            error=compact_diagnostic(item.error),
             created_at=item.created_at,
             updated_at=item.updated_at,
         )
@@ -328,7 +352,16 @@ async def get_run(run_id: uuid.UUID, _: Admin, session: Session) -> RunDetail:
     return RunDetail(
         **summary.model_dump(),
         tasks=[RunTaskResponse.model_validate(item) for item in tasks],
-        events=[RunEventResponse.model_validate(item) for item in events],
+        events=[
+            RunEventResponse(
+                id=item.id,
+                sequence=item.sequence,
+                event_type=item.event_type,
+                payload=_bounded_event_payload(item.payload),
+                created_at=item.created_at,
+            )
+            for item in events
+        ],
         invocations=invocations,
         approvals=[RunApprovalResponse.model_validate(item) for item in approvals],
         verification_criteria=[
@@ -339,6 +372,9 @@ async def get_run(run_id: uuid.UUID, _: Admin, session: Session) -> RunDetail:
             VerificationEvidenceResponse.model_validate(item)
             for item in verification_evidence
         ],
+        failure_category=failure.category if failure else None,
+        failure_message=failure.message if failure else None,
+        failure_retryable=failure.retryable if failure else False,
     )
 
 

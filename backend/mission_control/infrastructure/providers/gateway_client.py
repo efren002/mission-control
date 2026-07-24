@@ -83,6 +83,8 @@ class ProviderResult:
     cached_input_tokens: int | None
     output_tokens: int | None
     total_tokens: int | None
+    rate_limited: bool = False
+    rate_limit_detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -805,6 +807,7 @@ class ProviderGatewayClient:
         output = "".join(stdout)
         raw_usage = completed.get("usage")
         usage = raw_usage if isinstance(raw_usage, dict) else {}
+        rate_limit_detail = completed.get("rateLimitDetail")
         result = ProviderResult(
             output=output,
             duration_ms=_optional_int(completed.get("durationMs")),
@@ -812,6 +815,8 @@ class ProviderGatewayClient:
             cached_input_tokens=_optional_int(usage.get("cachedInputTokens")),
             output_tokens=_optional_int(usage.get("outputTokens")),
             total_tokens=_optional_int(usage.get("totalTokens")),
+            rate_limited=completed.get("rateLimited") is True,
+            rate_limit_detail=rate_limit_detail if isinstance(rate_limit_detail, str) else None,
         )
         if completed.get("timedOut") is True:
             raise ProviderExecutionError("Provider execution timed out", result=result)

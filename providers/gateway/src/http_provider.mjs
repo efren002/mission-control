@@ -8,6 +8,8 @@
  * filesystem or the sandbox supervisor.
  */
 
+import { assertResolvesSafely } from "./network_guard.mjs";
+
 const ANTHROPIC_VERSION = "2023-06-01";
 const RESERVED_NAMES = new Set(["codex", "claude"]);
 
@@ -99,6 +101,7 @@ export function buildModelsRequest(entry, { apiKey }) {
  */
 export async function probeHttpModels({ entry, apiKey, timeoutMs = 10_000 }) {
   const { url, headers } = buildModelsRequest(entry, { apiKey });
+  await assertResolvesSafely(new URL(url).hostname, { context: "Provider base_url" });
   let response;
   try {
     response = await fetch(url, {
@@ -149,6 +152,7 @@ export async function streamHttpCompletion({
   onStderr,
 }) {
   const { url, headers, body } = buildHttpRequest(entry, { apiKey, model, prompt });
+  await assertResolvesSafely(new URL(url).hostname, { context: "Provider base_url" });
   let response;
   try {
     response = await fetch(url, {

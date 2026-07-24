@@ -389,8 +389,8 @@ Mission Control detects these defaults when the project command is empty:
 
 - Node projects with a `test` script: `npm test`
 - Node projects with a `dev` script: `npm run dev -- --host 0.0.0.0 --port $PORT`
-- Laravel projects: `php artisan test` and
-  `php artisan serve --host 0.0.0.0 --port $PORT`
+- Laravel projects: `php artisan test`, followed by `npm test` when the project
+  defines a Node test script, and `php artisan serve --host 0.0.0.0 --port $PORT`
 
 Use **Projects** to override either command. An empty field restores auto-detection. Commands
 run through `sh -c` inside the runtime gateway and should be treated as trusted project

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { buildHttpRequest, streamHttpCompletion } from "../src/http_provider.mjs";
+import { buildHttpRequest, probeHttpModels, streamHttpCompletion } from "../src/http_provider.mjs";
 
 const OPENAI_ENTRY = {
   name: "openrouter",
@@ -223,4 +223,26 @@ test("streamHttpCompletion surfaces a non-2xx upstream response as an error with
     /401|invalid api key/i,
   );
   assert.ok(stderr.join("").length > 0);
+});
+
+test("streamHttpCompletion refuses to call a cloud-metadata base_url", async () => {
+  const entry = { ...OPENAI_ENTRY, base_url: "http://169.254.169.254/latest" };
+  await assert.rejects(
+    () =>
+      streamHttpCompletion({
+        entry,
+        apiKey: "sk-test",
+        model: null,
+        prompt: "hi",
+        timeoutMs: 5_000,
+        onStdout: () => {},
+        onStderr: () => {},
+      }),
+    /metadata/i,
+  );
+});
+
+test("probeHttpModels refuses to call a cloud-metadata base_url", async () => {
+  const entry = { ...OPENAI_ENTRY, base_url: "http://169.254.169.254/latest" };
+  await assert.rejects(() => probeHttpModels({ entry, apiKey: "sk-test" }), /metadata/i);
 });

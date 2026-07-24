@@ -93,7 +93,11 @@ before(async () => {
       PROVIDER_GATEWAY_PORT: String(GATEWAY_PORT),
       PROVIDER_GATEWAY_TOKEN: TOKEN,
       PROVIDER_GATEWAY_WORKSPACE_ROOT: workspaceRoot,
+      PROVIDER_GATEWAY_WORKTREE_ROOT: join(workspaceRoot, "worktrees"),
       PROVIDER_GATEWAY_LOGIN_VERIFY_TIMEOUT_MS: "1500",
+      // Login flows never touch the sandbox supervisor; the tests run with
+      // --no-deps so the supervisor is absent.
+      SANDBOX_REQUIRED: "false",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

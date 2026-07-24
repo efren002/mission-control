@@ -48,8 +48,14 @@ before(async () => {
       PROVIDER_GATEWAY_PORT: String(GATEWAY_PORT),
       PROVIDER_GATEWAY_TOKEN: TOKEN,
       PROVIDER_GATEWAY_WORKSPACE_ROOT: workspaceRoot,
+      PROVIDER_GATEWAY_WORKTREE_ROOT: join(workspaceRoot, "worktrees"),
       PROVIDER_GATEWAY_APP_PORT_RANGE: APP_PORT_RANGE,
       PROVIDER_GATEWAY_RUNTIME_ONLY: "true",
+      // These tests run with --no-deps so the sandbox supervisor is absent;
+      // clear its URL too so commands run as local subprocesses instead of
+      // routing to an unreachable supervisor.
+      SANDBOX_REQUIRED: "false",
+      SANDBOX_SUPERVISOR_URL: "",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

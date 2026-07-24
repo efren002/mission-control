@@ -27,6 +27,7 @@ import {
 import {
   initialProviderUsage,
   parseProviderUsage,
+  parseRateLimitSignal,
   recordProviderUsage,
 } from "./usage.mjs";
 import { buildRegistry, httpProviderStatus, HTTP_KIND_NAME } from "./registry.mjs";
@@ -62,6 +63,21 @@ const PROVIDER_STATUS_TTL_MS = Number(process.env.PROVIDER_GATEWAY_STATUS_TTL_MS
 const providerProbeCache = new Map();
 const appProcesses = new Map();
 const authenticationFailures = new Map();
+const rateLimitStatus = new Map();
+
+function recordRateLimitSignal(provider, exitCode, stdout, stderr) {
+  const signal = parseRateLimitSignal({ exitCode, stdout, stderr });
+  if (signal === null) {
+    if (exitCode === 0) rateLimitStatus.delete(provider);
+    return;
+  }
+  rateLimitStatus.set(provider, {
+    exhausted: signal.exhausted,
+    detail: signal.detail,
+    info: signal.info ?? rateLimitStatus.get(provider)?.info ?? null,
+    updatedAt: new Date().toISOString(),
+  });
+}
 const providerUsage = new Map([
   ["codex", initialProviderUsage()],
   ["claude", initialProviderUsage()],
@@ -257,9 +273,9 @@ function commandFor(provider, workspace, prompt, model, accessMode) {
         ...(model ? ["--model", model] : []),
         "--cd",
         workspace,
-        ...(accessMode === "workspace-write"
-          ? ["--dangerously-bypass-approvals-and-sandbox"]
-          : ["--sandbox", "read-only"]),
+        // The disposable container is the security boundary. Codex's nested
+        // bwrap sandbox cannot create namespaces inside that hardened container.
+        "--dangerously-bypass-approvals-and-sandbox",
         "--json",
         "--ephemeral",
         "--skip-git-repo-check",
@@ -613,6 +629,7 @@ async function providerStatus() {
   names.forEach((provider, index) => {
     const { version, authentication, rateLimits } = probes[index];
     const runtimeAuthError = authenticationFailures.get(provider);
+    const runtimeRateLimit = rateLimitStatus.get(provider);
     providers[provider] = {
       ...providerCommands[provider],
       kind: "cli",
@@ -627,6 +644,13 @@ async function providerStatus() {
         recentRequests: recentProviderUsage.get(provider),
       },
       ...(rateLimits ?? {}),
+      // Best-effort, parsed from the CLI's own output during the last
+      // invocation — see parseRateLimitSignal. Populated for both Claude
+      // and Codex, unlike `rateLimits` above which is Codex's own
+      // app-server RPC and has no Claude equivalent.
+      rateLimitExhausted: runtimeRateLimit?.exhausted === true,
+      rateLimitDetail: runtimeRateLimit?.exhausted ? runtimeRateLimit.detail : null,
+      rateLimitInfo: runtimeRateLimit?.info ?? null,
       available:
         version.available &&
         authentication.authenticated &&
@@ -777,6 +801,7 @@ async function execute(request, response, body) {
         kind: "provider",
         provider,
         args,
+        accessMode,
         workspace,
         timeoutMs,
         sandboxId: sandboxIdentity(body.sandboxId),
@@ -819,7 +844,15 @@ async function execute(request, response, body) {
               stderr.trim().slice(-2_000) || "Provider authentication failed",
             );
           }
-          writeEvent(response, event, { ...payload, provider, usage: parsedUsage });
+          recordRateLimitSignal(provider, payload.exitCode, stdout, stderr);
+          const rateLimit = rateLimitStatus.get(provider);
+          writeEvent(response, event, {
+            ...payload,
+            provider,
+            usage: parsedUsage,
+            rateLimited: rateLimit?.exhausted === true,
+            rateLimitDetail: rateLimit?.exhausted ? rateLimit.detail : null,
+          });
           return;
         }
         writeEvent(response, event, {
@@ -894,6 +927,8 @@ async function execute(request, response, body) {
           stderr.trim().slice(-2_000) || "Provider authentication failed",
         );
       }
+      recordRateLimitSignal(provider, code, stdout, stderr);
+      const rateLimit = rateLimitStatus.get(provider);
       writeEvent(response, "completed", {
         provider,
         exitCode: code,
@@ -904,6 +939,8 @@ async function execute(request, response, body) {
         stdoutBytes: Buffer.byteLength(stdout),
         stderrBytes: Buffer.byteLength(stderr),
         usage: parsedUsage,
+        rateLimited: rateLimit?.exhausted === true,
+        rateLimitDetail: rateLimit?.exhausted ? rateLimit.detail : null,
       });
       resolveProcess();
     });

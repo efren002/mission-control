@@ -41,6 +41,29 @@ describe("NotificationCenter", () => {
     expect(screen.getByText("No notifications yet.")).toBeInTheDocument();
   });
 
+  it("surfaces a provider rate-limit event as a distinct alert", () => {
+    render(
+      <NotificationCenter
+        connectionState="connected"
+        lastEvent={{
+          type: "provider.rate_limited",
+          source: "workflow",
+          provider: "claude",
+          purpose: "task_execution",
+          timestamp: "2026-07-17T00:00:00.000Z",
+        }}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Notifications, 1 unread" }),
+    );
+    expect(screen.getByText("Provider rate limit reached")).toBeInTheDocument();
+    expect(
+      screen.getByText(/claude's usage limit was reached during task execution/i),
+    ).toBeInTheDocument();
+  });
+
   it("does not surface keepalive traffic", () => {
     render(
       <NotificationCenter

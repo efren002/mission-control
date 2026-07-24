@@ -45,7 +45,10 @@ migrate:
 	docker compose run --rm migrate
 
 test:
-	docker compose run --rm --no-deps provider-gateway npm test
+	# PROVIDER_GATEWAY_REWRITE_LOCALHOST is an operator convenience for the real
+	# service (compose.yaml); the test suite's mock HTTP servers bind to
+	# 127.0.0.1 in-container and must not be rewritten to host.docker.internal.
+	docker compose run --rm --no-deps -e PROVIDER_GATEWAY_REWRITE_LOCALHOST=false provider-gateway npm test
 	docker compose run --rm api python -m pytest
 	docker compose run --rm web npm test -- --run
 

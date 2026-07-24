@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 
 import { decryptKey } from "./crypto.mjs";
 import { RESERVED_NAMES } from "./http_provider.mjs";
+import { assertHostnameNotBlocked } from "./network_guard.mjs";
 
 const CLI_KIND = "cli";
 const HTTP_KIND = "http";
@@ -102,6 +103,13 @@ export function validateHttpFields(raw) {
   if (typeof base_url !== "string" || !/^https?:\/\//i.test(base_url)) {
     throw new Error(`Provider "${name}" base_url must be an http(s) URL`);
   }
+  let hostname;
+  try {
+    hostname = new URL(base_url).hostname;
+  } catch {
+    throw new Error(`Provider "${name}" base_url is not a valid URL`);
+  }
+  assertHostnameNotBlocked(hostname, { context: `Provider "${name}" base_url` });
   return {
     name,
     kind: HTTP_KIND,

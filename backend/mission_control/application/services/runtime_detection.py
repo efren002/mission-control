@@ -32,12 +32,15 @@ def detect_commands(repository_path: str | Path) -> DetectedCommands:
     gateway image (PHP CLI with Composer, and Node with npm).
     """
     repository = Path(repository_path)
+    scripts = _package_scripts(repository)
     if (repository / "artisan").is_file() and (repository / "composer.json").is_file():
+        test_commands = ["php artisan test"]
+        if "test" in scripts:
+            test_commands.append("npm test")
         return DetectedCommands(
-            test_command="php artisan test",
+            test_command=" && ".join(test_commands),
             app_command="php artisan serve --host 0.0.0.0 --port $PORT",
         )
-    scripts = _package_scripts(repository)
     return DetectedCommands(
         test_command="npm test" if "test" in scripts else None,
         app_command="npm run dev -- --host 0.0.0.0 --port $PORT" if "dev" in scripts else None,

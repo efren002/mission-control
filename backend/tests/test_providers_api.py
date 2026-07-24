@@ -88,7 +88,13 @@ async def test_create_custom_provider_rejects_invalid_body(
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/v1/providers/custom",
-            json={"name": "a", "kind": "http", "format": "openai", "base_url": "https://x/v1", "api_key": "k"},
+            json={
+                "name": "a",
+                "kind": "http",
+                "format": "openai",
+                "base_url": "https://x/v1",
+                "api_key": "k",
+            },
         )
     assert response.status_code == 422
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { Bell, Check, Trash2 } from "lucide-react";
+import { AlertTriangle, Bell, Check, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { RealtimeEvent } from "@/features/system/types";
@@ -14,18 +14,32 @@ interface Notification extends RealtimeEvent {
 
 const ignoredEventTypes = new Set(["system.keepalive", "system.heartbeat"]);
 
+const alertEventTypes = new Set([
+  "planner.failed",
+  "execution.failed",
+  "verification.failed",
+  "worktree.integration_failed",
+  "provider.rate_limited",
+]);
+
 function eventTitle(type: string) {
   const titles: Record<string, string> = {
     "system.connected": "Command uplink connected",
     "planner.started": "Planning started",
     "planner.completed": "Planning completed",
     "planner.failed": "Planning failed",
+    "provider.rate_limited": "Provider rate limit reached",
   };
 
   return titles[type] ?? type.replaceAll(".", " ");
 }
 
 function eventDetail(event: RealtimeEvent) {
+  if (event.type === "provider.rate_limited") {
+    const provider = typeof event.provider === "string" ? event.provider : "A provider";
+    const purpose = typeof event.purpose === "string" ? ` during ${event.purpose.replaceAll("_", " ")}` : "";
+    return `${provider}'s usage limit was reached${purpose}. The mission stopped until it resets.`;
+  }
   if (typeof event.detail === "string") return event.detail;
   if (typeof event.title === "string") return event.title;
   if (typeof event.task_count === "number") {
@@ -139,14 +153,26 @@ export function NotificationCenter({
           </div>
 
           <div className="max-h-80 overflow-y-auto">
-            {notifications.map((notification) => (
+            {notifications.map((notification) => {
+              const isAlert = alertEventTypes.has(notification.type);
+              return (
               <article
                 key={notification.id}
                 className="border-b border-[#292824] px-4 py-3 last:border-b-0"
               >
                 <div className="flex items-start gap-3">
-                  <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center border border-signal/30 bg-signal/[0.06]">
-                    <Check className="h-3 w-3 text-signal" />
+                  <span
+                    className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center border ${
+                      isAlert
+                        ? "border-orange-400/40 bg-orange-400/[0.08]"
+                        : "border-signal/30 bg-signal/[0.06]"
+                    }`}
+                  >
+                    {isAlert ? (
+                      <AlertTriangle className="h-3 w-3 text-orange-300" />
+                    ) : (
+                      <Check className="h-3 w-3 text-signal" />
+                    )}
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="text-[11px] capitalize text-terminal">
@@ -161,7 +187,8 @@ export function NotificationCenter({
                   </div>
                 </div>
               </article>
-            ))}
+              );
+            })}
             {notifications.length === 0 && (
               <div className="px-5 py-10 text-center">
                 <Bell className="mx-auto h-4 w-4 text-[#55524c]" />

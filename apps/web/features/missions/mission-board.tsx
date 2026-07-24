@@ -102,6 +102,26 @@ function lastActivityOf(detail: RunDetail): { label: string; at: number } | null
   return null;
 }
 
+export function missionLoadIsCurrent({
+  sequence,
+  currentSequence,
+  requestedId,
+  resolvedId,
+  detail,
+}: {
+  sequence: number;
+  currentSequence: number;
+  requestedId: string;
+  resolvedId: string;
+  detail: RunDetail | null;
+}): boolean {
+  return (
+    sequence === currentSequence &&
+    (!requestedId || requestedId === resolvedId) &&
+    (!detail || detail.objective_id === resolvedId)
+  );
+}
+
 export function MissionBoard() {
   const { token } = useAdminToken();
   const { confirm, confirmDialog } = useConfirm();
@@ -119,6 +139,14 @@ export function MissionBoard() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const selectedIdRef = useRef("");
+  const loadSequenceRef = useRef(0);
+
+  const selectMission = (objectiveId: string) => {
+    selectedIdRef.current = objectiveId;
+    setSelectedId(objectiveId);
+    setDetail(null);
+  };
 
   const addImages = (incoming: File[]) => {
     const { accepted, rejected } = acceptMissionImages(incoming, images.length);
@@ -128,6 +156,7 @@ export function MissionBoard() {
 
   const load = useCallback(async () => {
     if (!token) return;
+    const sequence = ++loadSequenceRef.current;
     try {
       const [loadedProjects, loadedObjectives, loadedRuns, loadedRepositories] =
         await Promise.all([
@@ -137,20 +166,33 @@ export function MissionBoard() {
           catalogApi.repositories(token),
         ]);
       setProjects(loadedProjects);
-      setObjectives(loadedObjectives);
-      setRepositories(loadedRepositories);
+      const requestedId = selectedIdRef.current;
       const selected =
-        loadedObjectives.find((item) => item.id === selectedId) ?? loadedObjectives[0];
-      setSelectedId(selected?.id ?? "");
+        loadedObjectives.find((item) => item.id === requestedId) ?? loadedObjectives[0];
+      const resolvedId = selected?.id ?? "";
       const latestRun = selected
         ? loadedRuns.find((run) => run.objective_id === selected.id)
         : undefined;
-      setDetail(latestRun ? await catalogApi.run(token, latestRun.id) : null);
+      const loadedDetail = latestRun ? await catalogApi.run(token, latestRun.id) : null;
+      if (
+        !missionLoadIsCurrent({
+          sequence,
+          currentSequence: loadSequenceRef.current,
+          requestedId: selectedIdRef.current,
+          resolvedId,
+          detail: loadedDetail,
+        })
+      ) return;
+      selectedIdRef.current = resolvedId;
+      setSelectedId(resolvedId);
+      setObjectives(loadedObjectives);
+      setRepositories(loadedRepositories);
+      setDetail(loadedDetail);
       setError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to load missions");
     }
-  }, [token, selectedId]);
+  }, [token]);
 
   useVisiblePolling(load, 5_000, Boolean(token), selectedId);
 
@@ -169,7 +211,7 @@ export function MissionBoard() {
       );
       setTitle("");
       setDescription("");
-      setSelectedId(objective.id);
+      selectMission(objective.id);
       try {
         for (const image of images) {
           await catalogApi.uploadAttachment(token, objective.id, image);
@@ -231,7 +273,7 @@ export function MissionBoard() {
     if (!accepted) return;
     try {
       await catalogApi.deleteObjective(token, objective.id);
-      if (selectedId === objective.id) setSelectedId("");
+      if (selectedId === objective.id) selectMission("");
       await load();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to delete the mission");
@@ -378,7 +420,7 @@ export function MissionBoard() {
               return (
                 <button
                   key={objective.id}
-                  onClick={() => setSelectedId(objective.id)}
+                  onClick={() => selectMission(objective.id)}
                   className={`w-full border p-3 text-left ${
                     selectedId === objective.id
                       ? "border-signal/60 bg-signal/[0.04]"
@@ -578,6 +620,7 @@ export function MissionDetail({
     detail?.status === "failed" && detail.current_step === "verification_failed";
   const lastError =
     [...(detail?.invocations ?? [])].reverse().find((item) => item.error)?.error ?? null;
+  const failureMessage = detail?.failure_message ?? null;
   const selectedRepository =
     repositories.find((item) => item.id === detail?.repository_id) ?? null;
   const repositoryPath =
@@ -799,8 +842,18 @@ export function MissionDetail({
           <p className="text-[10px] font-bold uppercase tracking-wider text-signal">
             {objective.status === "draft" ? "Ready to plan" : "Try planning again"}
           </p>
+          {failureMessage && objective.status !== "draft" && (
+            <p className="mt-2 break-words text-[10px] leading-4 text-orange-300">
+              {failureMessage}
+            </p>
+          )}
           {lastError && objective.status !== "draft" && (
-            <p className="mt-2 break-words text-[10px] leading-4 text-orange-300">{lastError}</p>
+            <details className="mt-2 text-[10px] leading-4 text-dim">
+              <summary className="cursor-pointer font-bold uppercase tracking-wider">
+                Technical diagnostic
+              </summary>
+              <p className="mt-2 break-words">{lastError}</p>
+            </details>
           )}
           {canRetryTask && (
             <p className="mt-2 text-[10px] leading-4 text-orange-200">
@@ -1013,10 +1066,18 @@ export function MissionDetail({
         />
       )}
 
-      {objective.status === "failed" && lastError && !canPlan && (
-        <p className="mt-6 break-words border border-orange-700/50 bg-orange-900/10 p-4 text-[10px] leading-4 text-orange-200">
-          {lastError}
-        </p>
+      {objective.status === "failed" && (failureMessage || lastError) && !canPlan && (
+        <section className="mt-6 border border-orange-700/50 bg-orange-900/10 p-4 text-[10px] leading-4 text-orange-200">
+          {failureMessage && <p className="font-semibold">{failureMessage}</p>}
+          {lastError && (
+            <details className={failureMessage ? "mt-2" : ""}>
+              <summary className="cursor-pointer font-bold uppercase tracking-wider text-dim">
+                Technical diagnostic
+              </summary>
+              <p className="mt-2 break-words">{lastError}</p>
+            </details>
+          )}
+        </section>
       )}
 
       {detail?.worktree_status === "preserved" && (

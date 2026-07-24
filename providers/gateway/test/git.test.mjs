@@ -364,6 +364,39 @@ test("gitIntegrateTaskWorktree copies any gitignored artifact a task built, not 
   }
 });
 
+test("gitIntegrateTaskWorktree refreshes an existing gitignored dependency directory", async () => {
+  const { workspace } = initRepository();
+  const worktreeRoot = mkdtempSync(join(tmpdir(), "gateway-worktrees-"));
+  try {
+    writeFileSync(join(workspace, ".gitignore"), "/node_modules\n");
+    mkdirSync(join(workspace, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(join(workspace, "node_modules", ".bin", "existing"), "old\n");
+    await gitCheckpoint(workspace, "Add dependency metadata");
+    const task = await gitCreateTaskWorktree(
+      workspace,
+      "d198f342-7b3d-4a21-8c11-63c7b229d880",
+      worktreeRoot,
+    );
+    writeFileSync(join(task.worktree, "node_modules", ".bin", "vitest"), "new\n");
+    writeFileSync(join(task.worktree, "app.php"), "uses vitest\n");
+    await gitCheckpoint(task.worktree, "Add browser tests");
+
+    await gitIntegrateTaskWorktree(workspace, task.worktree, task.branch, task.baselineSha);
+
+    assert.equal(
+      readFileSync(join(workspace, "node_modules", ".bin", "existing"), "utf8"),
+      "old\n",
+    );
+    assert.equal(
+      readFileSync(join(workspace, "node_modules", ".bin", "vitest"), "utf8"),
+      "new\n",
+    );
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("gitCreateTaskWorktree does not follow a gitignored symlink built in a different worktree", async () => {
   const { workspace } = initRepository();
   const worktreeRoot = mkdtempSync(join(tmpdir(), "gateway-worktrees-"));

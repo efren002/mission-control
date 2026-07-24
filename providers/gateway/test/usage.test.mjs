@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   initialProviderUsage,
   parseProviderUsage,
+  parseRateLimitSignal,
   recordProviderUsage,
 } from "../src/usage.mjs";
 
@@ -41,6 +42,57 @@ test("parses Claude result usage including cache tokens", () => {
     outputTokens: 10,
     totalTokens: 100,
   });
+});
+
+test("parseRateLimitSignal captures Claude's structured rate_limit_info even on success", () => {
+  const output = [
+    JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: { primary: { used_percent: 42 } },
+    }),
+    JSON.stringify({ type: "result", usage: {} }),
+  ].join("\n");
+
+  assert.deepEqual(parseRateLimitSignal({ exitCode: 0, stdout: output, stderr: "" }), {
+    exhausted: false,
+    info: { primary: { used_percent: 42 } },
+    detail: null,
+  });
+});
+
+test("parseRateLimitSignal flags exhaustion from Claude's usage-limit error text", () => {
+  const stderr = "Error: You have reached your specified monthly usage limits.";
+  const result = parseRateLimitSignal({ exitCode: 1, stdout: "", stderr });
+
+  assert.equal(result.exhausted, true);
+  assert.match(result.detail, /usage limits/);
+});
+
+test("parseRateLimitSignal flags exhaustion from Codex's 429/rate-limit wording", () => {
+  const stderr = "Request failed: 429 Too Many Requests";
+  const result = parseRateLimitSignal({ exitCode: 1, stdout: "", stderr });
+
+  assert.equal(result.exhausted, true);
+});
+
+test("parseRateLimitSignal returns null for an unrelated failure", () => {
+  const result = parseRateLimitSignal({
+    exitCode: 1,
+    stdout: "",
+    stderr: "Error: connection reset by peer",
+  });
+
+  assert.equal(result, null);
+});
+
+test("parseRateLimitSignal does not flag a clean success with no rate-limit info", () => {
+  const result = parseRateLimitSignal({
+    exitCode: 0,
+    stdout: JSON.stringify({ type: "result", usage: {} }),
+    stderr: "",
+  });
+
+  assert.equal(result, null);
 });
 
 test("records requests even when a failed run has no token metadata", () => {

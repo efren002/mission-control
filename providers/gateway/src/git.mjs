@@ -56,7 +56,6 @@ async function syncDependencyDirectories(sourceDir, targetDir) {
   for (const relativePath of gitignoredArtifactPaths(targetDir)) {
     const sourcePath = resolve(sourceDir, relativePath);
     const targetPath = resolve(targetDir, relativePath);
-    if (existsSync(targetPath)) continue;
     let sourceStat;
     try {
       sourceStat = await lstat(sourcePath);

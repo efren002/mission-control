@@ -65,6 +65,19 @@ test("registry rejects an unsupported kind or format", () => {
   assert.throws(() => buildRegistry({ customProvidersPath: path }), /kind/i);
 });
 
+test("registry rejects a base_url pointed at the cloud metadata address", () => {
+  const path = writeConfig({
+    providers: [httpEntry({ base_url: "http://169.254.169.254/latest/meta-data" })],
+  });
+  assert.throws(() => buildRegistry({ customProvidersPath: path }), /metadata/i);
+});
+
+test("registry allows a base_url pointed at a loopback/private address", () => {
+  const path = writeConfig({ providers: [httpEntry({ base_url: "http://127.0.0.1:11434" })] });
+  const registry = buildRegistry({ customProvidersPath: path });
+  assert.equal(registry.get("openrouter").base_url, "http://127.0.0.1:11434");
+});
+
 test("registry rejects an entry missing an encrypted_api_key", () => {
   const { encrypted_api_key, ...withoutKey } = httpEntry();
   const path = writeConfig({ providers: [withoutKey] });
